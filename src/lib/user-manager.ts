@@ -1,8 +1,10 @@
+import { randomBytes } from 'crypto';
+import { isValidClientId } from './security';
+
 export interface DeviceProfile {
   id: string;
   name: string;
   token: string;
-  ownerEmail: string;
   createdAt: number;
   lastActive: number;
   totalQueries: number;
@@ -12,117 +14,103 @@ export interface DeviceProfile {
 
 export interface UserAccount {
   id: string;
-  email: string;
   role: 'admin' | 'user';
   name: string;
   createdAt: number;
 }
 
+/** Hard cap so anonymous registrations on a public instance cannot exhaust memory. */
+const MAX_DEVICES = Math.max(10, parseInt(process.env.MAX_DEVICES || '1000', 10) || 1000);
+
+export type RegisterResult =
+  | { ok: true; device: DeviceProfile }
+  | { ok: false; error: string; status: number };
+
 class UserManager {
   private static instance: UserManager;
-  private users: UserAccount[] = [
-    {
-      id: 'usr_admin',
-      email: 'veer@bhanushali.com',
-      role: 'admin',
-      name: 'Veer Bhanushali',
-      createdAt: Date.now() - 86400000 * 30,
-    },
-  ];
-
-  private devices: DeviceProfile[] = [
-    {
-      id: 'dev_1',
-      name: 'Veer’s iPhone 15 Pro',
-      token: 'veer-iphone',
-      ownerEmail: 'veer@bhanushali.com',
-      createdAt: Date.now() - 86400000 * 14,
-      lastActive: Date.now() - 1000 * 60 * 2,
-      totalQueries: 1420,
-      blockedQueries: 380,
-      status: 'active',
-    },
-    {
-      id: 'dev_2',
-      name: 'Work MacBook Pro',
-      token: 'work-laptop',
-      ownerEmail: 'veer@bhanushali.com',
-      createdAt: Date.now() - 86400000 * 7,
-      lastActive: Date.now() - 1000 * 60 * 15,
-      totalQueries: 890,
-      blockedQueries: 140,
-      status: 'active',
-    },
-    {
-      id: 'dev_3',
-      name: 'Living Room Smart TV',
-      token: 'smart-tv',
-      ownerEmail: 'veer@bhanushali.com',
-      createdAt: Date.now() - 86400000 * 3,
-      lastActive: Date.now() - 1000 * 60 * 45,
-      totalQueries: 410,
-      blockedQueries: 95,
-      status: 'active',
-    },
-  ];
+  private devices = new Map<string, DeviceProfile>(); // keyed by token
 
   private constructor() {}
 
   public static getInstance(): UserManager {
-    if (!UserManager.instance) {
-      UserManager.instance = new UserManager();
-    }
+    if (!UserManager.instance) UserManager.instance = new UserManager();
     return UserManager.instance;
   }
 
   public getUsers(): UserAccount[] {
-    return this.users;
+    return [{ id: 'admin', role: 'admin', name: 'Administrator', createdAt: 0 }];
   }
 
   public getDevices(): DeviceProfile[] {
-    return this.devices;
+    return Array.from(this.devices.values());
   }
 
-  public registerDevice(name: string, token: string, ownerEmail = 'veer@bhanushali.com'): DeviceProfile {
-    const cleanToken = token.trim().toLowerCase().replace(/[^a-z0-9-_]/g, '') || `dev-${Date.now().toString(36)}`;
-    const newDev: DeviceProfile = {
-      id: `dev_${Date.now()}`,
-      name: name.trim() || 'My Device',
-      token: cleanToken,
-      ownerEmail,
+  public getDeviceByToken(token: string): DeviceProfile | undefined {
+    return this.devices.get(token);
+  }
+
+  /**
+   * Public registration returns a token with a random suffix so tokens are not
+   * guessable (a guessable token lets anyone read or pollute someone's stats).
+   */
+  public registerDevice(rawName: unknown, rawToken: unknown): RegisterResult {
+    if (this.devices.size >= MAX_DEVICES) {
+      return { ok: false, error: 'Device limit reached on this instance', status: 503 };
+    }
+    const name = typeof rawName === 'string' ? rawName.replace(/[\u0000-\u001f<>]/g, '').trim().slice(0, 64) : '';
+    const base =
+      (typeof rawToken === 'string' ? rawToken : '')
+        .toLowerCase()
+        .replace(/[^a-z0-9-]/g, '-')
+        .replace(/-+/g, '-')
+        .replace(/^-|-$/g, '')
+        .slice(0, 40) || 'device';
+    const token = `${base}-${randomBytes(4).toString('hex')}`;
+    if (!isValidClientId(token) || this.devices.has(token)) {
+      return { ok: false, error: 'Invalid device token', status: 400 };
+    }
+    const device: DeviceProfile = {
+      id: `dev_${randomBytes(6).toString('hex')}`,
+      name: name || 'My Device',
+      token,
       createdAt: Date.now(),
-      lastActive: Date.now(),
+      lastActive: 0,
       totalQueries: 0,
       blockedQueries: 0,
       status: 'active',
     };
-    this.devices.push(newDev);
-    return newDev;
+    this.devices.set(token, device);
+    return { ok: true, device };
   }
 
-  public toggleDeviceStatus(id: string, status: 'active' | 'paused' | 'revoked'): boolean {
-    const dev = this.devices.find((d) => d.id === id);
-    if (!dev) return false;
-    dev.status = status;
-    return true;
+  public setDeviceStatus(id: string, status: DeviceProfile['status']): boolean {
+    for (const d of this.devices.values()) {
+      if (d.id === id) {
+        d.status = status;
+        return true;
+      }
+    }
+    return false;
   }
 
   public deleteDevice(id: string): boolean {
-    const idx = this.devices.findIndex((d) => d.id === id);
-    if (idx === -1) return false;
-    this.devices.splice(idx, 1);
-    return true;
+    for (const [token, d] of this.devices) {
+      if (d.id === id) {
+        this.devices.delete(token);
+        return true;
+      }
+    }
+    return false;
   }
 
-  public recordDeviceActivity(tokenOrIp: string, blocked: boolean) {
-    const dev = this.devices.find((d) => d.token === tokenOrIp || tokenOrIp.includes(d.token));
-    if (dev) {
-      dev.totalQueries++;
-      if (blocked) dev.blockedQueries++;
-      dev.lastActive = Date.now();
-    }
+  public recordDeviceActivity(token: string | undefined, blocked: boolean) {
+    if (!token) return;
+    const dev = this.devices.get(token);
+    if (!dev) return;
+    dev.totalQueries++;
+    if (blocked) dev.blockedQueries++;
+    dev.lastActive = Date.now();
   }
 }
 
 export const userManager = UserManager.getInstance();
-

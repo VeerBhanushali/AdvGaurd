@@ -1,0 +1,19 @@
+rules_version = '2';
+// AdvGuard Firestore rules.
+// The server writes logs with the client SDK, so creation must be allowed,
+// but NOBODY can read, update or delete through the public API.
+// Read logs from the Firebase console (or a firebase-admin script) only.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /query_logs/{doc} {
+      allow create: if request.resource.data.keys().hasOnly(
+                         ['domain','query_type','client_ip','status','matched_rule','elapsed_ms','upstream','timestamp'])
+                    && request.resource.data.domain is string
+                    && request.resource.data.domain.size() <= 253;
+      allow read, update, delete: if false;
+    }
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

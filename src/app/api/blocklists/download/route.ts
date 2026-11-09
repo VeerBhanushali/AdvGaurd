@@ -3,11 +3,11 @@ import { generateRawBlocklist } from '@/lib/blocklists';
 
 export const dynamic = 'force-dynamic';
 
+/** Raw AdGuard/uBlock-syntax export of AdvGuard's own built-in lists. */
 export async function GET(req: NextRequest) {
-  const { searchParams } = new URL(req.url);
-  const listId = searchParams.get('id') || 'advguard-ultra';
-
+  const listId = req.nextUrl.searchParams.get('id') || 'advguard-starter';
   const content = generateRawBlocklist(listId);
+  if (!content) return new NextResponse('Unknown list', { status: 404 });
 
   return new NextResponse(content, {
     status: 200,
@@ -18,4 +18,3 @@ export async function GET(req: NextRequest) {
     },
   });
 }
-

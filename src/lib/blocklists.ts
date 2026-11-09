@@ -76,49 +76,79 @@ export interface CuratedListDef {
   category: string;
 }
 
+/**
+ * Lists that ship inside this repository. Counts are computed from the real
+ * data – no inflated marketing numbers. Large-scale coverage comes from the
+ * third-party upstream lists in REMOTE_BLOCKLISTS below.
+ */
 export const CURATED_ADVGUARD_LISTS: CuratedListDef[] = [
   {
-    id: 'advguard-ultra',
-    name: 'AdvGuard Ultra Shield',
-    description: 'Master ad-blocking list merging verified zero-false-positive commercial & tracker filters.',
+    id: 'advguard-starter',
+    name: 'AdvGuard Starter List',
+    description:
+      'Hand-picked ad networks, trackers and OS/app telemetry endpoints. Small, fast and low on false positives – works offline with no list downloads.',
     curator: 'Veer Bhanushali',
-    count: 184500,
-    updatedAt: 'Daily Sync',
-    category: 'Master AdBlock',
-  },
-  {
-    id: 'advguard-telemetry',
-    name: 'AdvGuard Telemetry & Tracker Cleanse',
-    description: 'Stops aggressive phoning-home telemetry from Windows, Samsung, Xiaomi, Apple, and mobile SDKs.',
-    curator: 'Veer Bhanushali',
-    count: 36200,
-    updatedAt: 'Daily Sync',
-    category: 'Privacy & Anti-Spy',
-  },
-  {
-    id: 'advguard-threats',
-    name: 'AdvGuard Threat & Malware Defense',
-    description: 'Blocks active phishing, cryptojacking, ransomware C2 nodes, and malicious scam domains.',
-    curator: 'Veer Bhanushali',
-    count: 54100,
-    updatedAt: 'Hourly Sync',
-    category: 'Cyber Security',
-  },
-  {
-    id: 'advguard-family',
-    name: 'AdvGuard SafeFamily Shield',
-    description: 'Blocks adult content, gambling, and dangerous web zones with enforced SafeSearch.',
-    curator: 'Veer Bhanushali',
-    count: 28900,
-    updatedAt: 'Weekly Sync',
-    category: 'Parental Control',
+    count: DEFAULT_BLOCKED_DOMAINS.size,
+    updatedAt: 'Ships with release',
+    category: 'Ads & Trackers',
   },
 ];
 
-export function generateRawBlocklist(listId: string): string {
-  const header = `! Title: ${listId.toUpperCase()} - AdvGuard Engine\n! Curated by: Veer Bhanushali\n! Homepage: https://advgaurd.veerbhanushali.com\n! License: MIT\n! --------------------------------------------------\n`;
-  const rules = Array.from(DEFAULT_BLOCKED_DOMAINS).map((d) => `||${d}^`).join('\n');
-  return header + rules;
+export interface RemoteListDef {
+  id: string;
+  name: string;
+  url: string;
+  category: string;
+  license: string;
+  homepage: string;
+}
+
+/**
+ * Well-maintained community lists, fetched at startup and refreshed daily.
+ * They are NOT redistributed by AdvGuard – each instance downloads them
+ * directly from the maintainer. Override with BLOCKLIST_URLS (comma-separated)
+ * or disable with REMOTE_BLOCKLISTS=false (e.g. on tiny shared-hosting plans).
+ */
+export const REMOTE_BLOCKLISTS: RemoteListDef[] = [
+  {
+    id: 'hagezi-pro',
+    name: 'HaGeZi Multi PRO',
+    url: 'https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/pro.txt',
+    category: 'Ads, Trackers, Malware',
+    license: 'GPL-3.0',
+    homepage: 'https://github.com/hagezi/dns-blocklists',
+  },
+];
+
+export function getRemoteListDefs(): RemoteListDef[] {
+  if (process.env.REMOTE_BLOCKLISTS === 'false') return [];
+  const custom = (process.env.BLOCKLIST_URLS || '')
+    .split(',')
+    .map((u) => u.trim())
+    .filter((u) => /^https:\/\//.test(u));
+  if (custom.length === 0) return REMOTE_BLOCKLISTS;
+  return custom.map((url, i) => ({
+    id: `custom-${i + 1}`,
+    name: new URL(url).hostname + new URL(url).pathname,
+    url,
+    category: 'Custom',
+    license: 'See source',
+    homepage: url,
+  }));
+}
+
+export function generateRawBlocklist(listId: string): string | null {
+  const list = CURATED_ADVGUARD_LISTS.find((l) => l.id === listId);
+  if (!list) return null;
+  const header =
+    `! Title: ${list.name}\n` +
+    `! Description: ${list.description}\n` +
+    `! Curator: ${list.curator}\n` +
+    `! Homepage: https://github.com/VeerBhanushali/AdvGaurd\n` +
+    `! License: MIT\n` +
+    `! Entries: ${DEFAULT_BLOCKED_DOMAINS.size}\n` +
+    `! --------------------------------------------------\n`;
+  return header + Array.from(DEFAULT_BLOCKED_DOMAINS).map((d) => `||${d}^`).join('\n') + '\n';
 }
 
 export function cleanDomain(domain: string): string {
@@ -139,13 +169,13 @@ export function parseRule(rule: string): { domain: string; isAllow: boolean } | 
   // Allow rule: @@||domain.com^
   if (trimmed.startsWith('@@||')) {
     const d = cleanDomain(trimmed.slice(4).replace(/\^.*$/, ''));
-    return { domain: d, isAllow: true };
+    return /^[a-z0-9._-]+$/.test(d) && d.includes('.') ? { domain: d, isAllow: true } : null;
   }
 
   // AdGuard block rule: ||domain.com^
   if (trimmed.startsWith('||')) {
     const d = cleanDomain(trimmed.slice(2).replace(/\^.*$/, ''));
-    return { domain: d, isAllow: false };
+    return /^[a-z0-9._-]+$/.test(d) && d.includes('.') ? { domain: d, isAllow: false } : null;
   }
 
   // Hosts format: 0.0.0.0 domain.com or 127.0.0.1 domain.com
@@ -154,6 +184,9 @@ export function parseRule(rule: string): { domain: string; isAllow: boolean } | 
     return { domain: cleanDomain(hostsMatch[1]), isAllow: false };
   }
 
-  // Plain domain
-  return { domain: cleanDomain(trimmed), isAllow: false };
+  // Plain domain (anything else – regex, cosmetic or modifier rules – is ignored)
+  if (/^[a-z0-9.*_-]+$/i.test(trimmed) && !trimmed.includes('*')) {
+    return { domain: cleanDomain(trimmed), isAllow: false };
+  }
+  return null;
 }

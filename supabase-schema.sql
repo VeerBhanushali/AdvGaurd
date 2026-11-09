@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS public.query_logs (
     timestamp TIMESTAMPTZ NOT NULL DEFAULT now(),
     domain TEXT NOT NULL,
     query_type VARCHAR(10) NOT NULL DEFAULT 'A',
-    client_ip VARCHAR(100) NOT NULL,
+    client_ip VARCHAR(100) NOT NULL, -- already anonymised (/24 or /64) by the server
     status VARCHAR(20) NOT NULL, -- 'BLOCKED', 'RESOLVED'
     matched_rule TEXT,
     elapsed_ms INT NOT NULL DEFAULT 0,
@@ -92,28 +92,43 @@ CREATE TABLE IF NOT EXISTS public.devices (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     token TEXT NOT NULL UNIQUE,
-    owner_email TEXT DEFAULT 'admin@advguard.local',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_active TIMESTAMPTZ NOT NULL DEFAULT now(),
     total_queries INT NOT NULL DEFAULT 0,
     blocked_queries INT NOT NULL DEFAULT 0,
     status VARCHAR(20) NOT NULL DEFAULT 'active'
 );
 
--- 8. AUTOMATIC 30-DAY LOG PURGE FUNCTION (GDPR & High-Security Privacy)
-CREATE OR REPLACE FUNCTION delete_old_query_logs()
-RETURNS INT LANGUAGE plpgsql AS $$
+-- 8. AUTOMATIC LOG PURGE FUNCTION (default 30 days)
+DROP FUNCTION IF EXISTS public.delete_old_query_logs();
+CREATE OR REPLACE FUNCTION public.delete_old_query_logs(retention_days INT DEFAULT 30)
+RETURNS INT LANGUAGE plpgsql
+SET search_path = public
+AS $$
 DECLARE
     deleted_count INT;
 BEGIN
-    DELETE FROM public.query_logs 
-    WHERE timestamp < (NOW() - INTERVAL '30 days');
+    IF retention_days IS NULL OR retention_days < 1 THEN
+        retention_days := 30;
+    END IF;
+    DELETE FROM public.query_logs
+    WHERE timestamp < (NOW() - make_interval(days => retention_days));
     GET DIAGNOSTICS deleted_count = ROW_COUNT;
     RETURN deleted_count;
 END;
 $$;
 
--- Enable Row Level Security (RLS) with Public Access Policy for DoH Engine
+-- Only the server (service_role) may run the purge.
+REVOKE ALL ON FUNCTION public.delete_old_query_logs(INT) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.delete_old_query_logs(INT) TO service_role;
+
+-- Optional: purge inside Postgres too (Database → Extensions → enable pg_cron first)
+-- SELECT cron.schedule('advguard-purge', '0 */12 * * *', $$SELECT public.delete_old_query_logs(30)$$);
+
+-- 9. ROW LEVEL SECURITY — LOCKED DOWN
+-- The AdvGuard server connects with SUPABASE_SERVICE_ROLE_KEY, which bypasses RLS.
+-- The public anon key (which ships to browsers) gets NO access to any table.
+-- Previous versions created "Anon Full Access" policies; they are dropped here.
 ALTER TABLE public.query_logs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.custom_rules ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.subscribed_blocklists ENABLE ROW LEVEL SECURITY;
@@ -122,27 +137,16 @@ ALTER TABLE public.blocked_services ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.settings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.devices ENABLE ROW LEVEL SECURITY;
 
--- Allow anonymous read/write with anon key
 DROP POLICY IF EXISTS "Anon Full Access Query Logs" ON public.query_logs;
-CREATE POLICY "Anon Full Access Query Logs" ON public.query_logs FOR ALL USING (true) WITH CHECK (true);
-
 DROP POLICY IF EXISTS "Anon Full Access Custom Rules" ON public.custom_rules;
-CREATE POLICY "Anon Full Access Custom Rules" ON public.custom_rules FOR ALL USING (true) WITH CHECK (true);
-
 DROP POLICY IF EXISTS "Anon Full Access Blocklists" ON public.subscribed_blocklists;
-CREATE POLICY "Anon Full Access Blocklists" ON public.subscribed_blocklists FOR ALL USING (true) WITH CHECK (true);
-
 DROP POLICY IF EXISTS "Anon Full Access Rewrites" ON public.dns_rewrites;
-CREATE POLICY "Anon Full Access Rewrites" ON public.dns_rewrites FOR ALL USING (true) WITH CHECK (true);
-
 DROP POLICY IF EXISTS "Anon Full Access Services" ON public.blocked_services;
-CREATE POLICY "Anon Full Access Services" ON public.blocked_services FOR ALL USING (true) WITH CHECK (true);
-
 DROP POLICY IF EXISTS "Anon Full Access Settings" ON public.settings;
-CREATE POLICY "Anon Full Access Settings" ON public.settings FOR ALL USING (true) WITH CHECK (true);
-
 DROP POLICY IF EXISTS "Anon Full Access Devices" ON public.devices;
-CREATE POLICY "Anon Full Access Devices" ON public.devices FOR ALL USING (true) WITH CHECK (true);
 
--- Done! Your database is completely ready for AdvGuard.
+REVOKE ALL ON public.query_logs, public.custom_rules, public.subscribed_blocklists,
+    public.dns_rewrites, public.blocked_services, public.settings, public.devices
+    FROM anon, authenticated;
 
+-- Done! Safe to re-run on an existing database.

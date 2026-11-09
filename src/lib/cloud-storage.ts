@@ -2,28 +2,21 @@ import { QueryLogEntry } from './types';
 import { db } from './firebase';
 import { collection, addDoc } from 'firebase/firestore';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import { shouldAnonymize } from './security';
 
-// Supabase Configuration
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY;
+// Supabase configuration – SERVER ONLY.
+// The service-role key bypasses RLS and must never be exposed to the browser,
+// so it is read from a non-NEXT_PUBLIC variable. The schema grants anon users
+// nothing, so a leaked anon key cannot read query logs.
+const supabaseUrl = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-// Privacy & GDPR Anonymizer (Masks IPv4 & IPv6 for Zero-PII logging on public clouds)
-export function anonymizeIp(ip: string): string {
-  if (!ip || ip === '::1' || ip === '127.0.0.1') return '127.0.0.1';
-  // IPv4: mask last octet (e.g. 103.21.244.78 -> 103.21.244.0)
-  if (ip.includes('.')) {
-    const parts = ip.split('.');
-    if (parts.length === 4) {
-      return `${parts[0]}.${parts[1]}.${parts[2]}.xxx`;
-    }
-  }
-  // IPv6: mask host identifier (keep /64 network prefix)
-  if (ip.includes(':')) {
-    const parts = ip.split(':');
-    return `${parts.slice(0, 3).join(':')}::xxxx`;
-  }
-  return 'anonymized';
+export function retentionDays(): number {
+  const d = parseInt(process.env.LOG_RETENTION_DAYS || '30', 10);
+  return Number.isFinite(d) && d >= 1 && d <= 365 ? d : 30;
 }
+
+const PURGE_INTERVAL_MS = 12 * 60 * 60 * 1000;
 
 // High-Speed Local In-Memory Cache (0ms latency, zero extra costs)
 class MemoryLruCache {
@@ -60,17 +53,19 @@ export class CloudStorage {
   private constructor() {
     if (supabaseUrl && supabaseKey) {
       try {
-        this.supabase = createClient(supabaseUrl, supabaseKey);
+        this.supabase = createClient(supabaseUrl, supabaseKey, {
+          auth: { persistSession: false, autoRefreshToken: false },
+        });
       } catch (e) {
         console.warn('Supabase initialization failed:', e);
       }
     }
 
-    // Schedule 30-day log purge check every 6 hours
-    if (typeof setInterval !== 'undefined') {
-      setInterval(() => {
-        this.purgeOldLogs(30).catch(() => {});
-      }, 6 * 60 * 60 * 1000);
+    // Background retention worker: runs every 12 hours (and once shortly after boot).
+    if (this.supabase) {
+      const run = () => this.purgeOldLogs().catch(() => {});
+      setTimeout(run, 60_000).unref?.();
+      setInterval(run, PURGE_INTERVAL_MS).unref?.();
     }
   }
 
@@ -88,8 +83,8 @@ export class CloudStorage {
     return {
       firebaseConnected: isFirebase,
       supabaseConnected: isSupabase,
-      privacyMode: 'Zero-PII IP Anonymization (Active)',
-      retentionPolicy: 'Auto-Purge 30 Days (Active)',
+      privacyMode: shouldAnonymize() ? 'Zero-PII IP Anonymization (Active)' : 'IP Anonymization DISABLED',
+      retentionPolicy: isSupabase ? `Auto-Purge ${retentionDays()} Days (Active)` : 'RAM only – last 500 entries, lost on restart',
       mode: isSupabase
         ? 'Supabase PostgreSQL (Cloud Enterprise)'
         : isFirebase
@@ -102,16 +97,16 @@ export class CloudStorage {
     return this.memoryCache.get(`dns:${type}:${domain}`);
   }
 
-  public async setCachedDns(domain: string, type: string, base64Packet: string, ttl = 300): Promise<void> {
+  public async setCachedDns(domain: string, type: string, base64Packet: string, ttl: number): Promise<void> {
     this.memoryCache.set(`dns:${type}:${domain}`, base64Packet, ttl);
   }
 
   // 30-Day Auto Purge Execution (GDPR & High Privacy Compliance)
-  public async purgeOldLogs(days = 30): Promise<number> {
+  public async purgeOldLogs(days = retentionDays()): Promise<number> {
     if (!this.supabase) return 0;
     try {
-      // 1. Try PostgreSQL function delete_old_query_logs()
-      const { data, error } = await this.supabase.rpc('delete_old_query_logs');
+      // 1. Try PostgreSQL function delete_old_query_logs(retention_days)
+      const { data, error } = await this.supabase.rpc('delete_old_query_logs', { retention_days: days });
       if (!error && typeof data === 'number') {
         this.lastPurge = Date.now();
         return data;
@@ -134,14 +129,13 @@ export class CloudStorage {
 
   // Asynchronous Query Log Ingestion (with Privacy Masking)
   public async saveQueryLog(entry: QueryLogEntry): Promise<void> {
-    // If running in public cloud mode or anonymization enabled, mask client IP
-    const shouldAnonymize = process.env.ANONYMIZE_IPS !== 'false';
-    const safeIp = shouldAnonymize ? anonymizeIp(entry.clientIp) : entry.clientIp;
+    // entry.clientIp is already anonymised by the DNS engine before it reaches here.
+    const safeIp = entry.clientIp;
 
-    // Trigger daily purge check lazily if 24 hours have passed
-    if (Date.now() - this.lastPurge > 24 * 60 * 60 * 1000) {
+    // Serverless platforms may never fire setInterval – purge lazily as a backstop.
+    if (Date.now() - this.lastPurge > PURGE_INTERVAL_MS) {
       this.lastPurge = Date.now();
-      this.purgeOldLogs(30).catch(() => {});
+      this.purgeOldLogs().catch(() => {});
     }
 
     // 1. Write to Supabase (Primary PostgreSQL Engine)

@@ -1,10 +1,20 @@
 import dnsPacket from 'dns-packet';
-import { cleanDomain, DEFAULT_BLOCKED_DOMAINS, parseRule, CURATED_ADVGUARD_LISTS, CuratedListDef } from './blocklists';
+import {
+  cleanDomain,
+  DEFAULT_BLOCKED_DOMAINS,
+  parseRule,
+  CURATED_ADVGUARD_LISTS,
+  CuratedListDef,
+  getRemoteListDefs,
+} from './blocklists';
 import { EngineStats, QueryLogEntry, CustomRule } from './types';
 import { cloudStorage } from './cloud-storage';
-import { BLOCKED_SERVICES, BlockedServiceDef } from './blocked-services';
+import { BLOCKED_SERVICES } from './blocked-services';
 import { firewallEngine, FirewallConfig } from './firewall';
 import { userManager, DeviceProfile, UserAccount } from './user-manager';
+import { displayIp, isValidHostname } from './security';
+import { isIP } from 'net';
+import { randomBytes } from 'crypto';
 
 export interface SubscribedList {
   id: string;
@@ -13,6 +23,8 @@ export interface SubscribedList {
   count: number;
   enabled: boolean;
   category: string;
+  lastUpdated?: number;
+  error?: string;
 }
 
 export interface DnsRewrite {
@@ -42,22 +54,101 @@ export interface AdGuardFullStats extends EngineStats {
   users: UserAccount[];
 }
 
+export interface DnsRequestContext {
+  /** Raw client IP – used only in-request; never stored. */
+  ip: string;
+  /** Validated device token from /dns-query/[clientId]. */
+  clientId?: string;
+}
+
+export interface DnsResult {
+  response: Buffer;
+  /** Seconds the response may be cached by HTTP caches (RFC 8484 §5.1). */
+  ttl: number;
+}
+
+const RCODE = { NOERROR: 0, FORMERR: 1, SERVFAIL: 2, NXDOMAIN: 3, NOTIMP: 4, REFUSED: 5 } as const;
+const BLOCK_TTL = 300;
+const MIN_CACHE_TTL = 10;
+const MAX_CACHE_TTL = 3600;
+const MAX_UPSTREAM_BYTES = 65_535;
+const MAX_COUNTER_KEYS = 5_000;
+const LIST_REFRESH_MS = 24 * 60 * 60 * 1000;
+const MAX_LIST_BYTES = 40 * 1024 * 1024;
+
+/** SafeSearch enforcement via CNAME, as documented by each provider. */
+const SAFE_SEARCH_CNAMES: Record<string, string> = {
+  'www.google.com': 'forcesafesearch.google.com',
+  'google.com': 'forcesafesearch.google.com',
+  'www.bing.com': 'strict.bing.com',
+  'bing.com': 'strict.bing.com',
+  'duckduckgo.com': 'safe.duckduckgo.com',
+  'www.duckduckgo.com': 'safe.duckduckgo.com',
+  'www.youtube.com': 'restrict.youtube.com',
+  'm.youtube.com': 'restrict.youtube.com',
+  'youtube.com': 'restrict.youtube.com',
+  'youtubei.googleapis.com': 'restrict.youtube.com',
+  'youtube.googleapis.com': 'restrict.youtube.com',
+  'www.youtube-nocookie.com': 'restrict.youtube.com',
+};
+
+function newId(): string {
+  return randomBytes(6).toString('hex');
+}
+
+/** Increments a counter map while keeping it bounded (public instances see unbounded domain cardinality). */
+function bump(map: Map<string, number>, key: string, by = 1) {
+  map.set(key, (map.get(key) || 0) + by);
+  if (map.size > MAX_COUNTER_KEYS) {
+    const sorted = Array.from(map.entries()).sort((a, b) => a[1] - b[1]);
+    for (let i = 0; i < sorted.length / 2; i++) map.delete(sorted[i][0]);
+  }
+}
+
+function top<T extends string>(map: Map<string, number>, n: number, label: T) {
+  return Array.from(map.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, n)
+    .map(([k, count]) => ({ [label]: k, count }) as Record<T, string> & { count: number });
+}
+
+function minTtl(packet: dnsPacket.Packet): number {
+  const ttls: number[] = [];
+  for (const a of packet.answers || []) if (typeof (a as any).ttl === 'number') ttls.push((a as any).ttl);
+  if (ttls.length === 0) {
+    // Negative answer: RFC 2308 – use SOA minimum.
+    for (const a of packet.authorities || []) {
+      if (a.type === 'SOA') ttls.push(Math.min((a as any).ttl ?? 60, (a as any).data?.minimum ?? 60));
+    }
+  }
+  const t = ttls.length ? Math.min(...ttls) : 60;
+  return Math.max(MIN_CACHE_TTL, Math.min(MAX_CACHE_TTL, t));
+}
+
 class DnsEngine {
   private static instance: DnsEngine;
-  private blockedDomains = new Set<string>(DEFAULT_BLOCKED_DOMAINS);
+
+  /** Per-list domain sets; only enabled lists participate in matching. */
+  private listDomains = new Map<string, Set<string>>([['advguard-starter', new Set(DEFAULT_BLOCKED_DOMAINS)]]);
+  private customBlocked = new Set<string>();
   private allowedDomains = new Set<string>();
   private customRules: CustomRule[] = [];
   private logs: QueryLogEntry[] = [];
+
   private totalQueries = 0;
   private blockedQueries = 0;
-  private malwareBlockedCount = 14;
-  private adultBlockedCount = 8;
+  private malwareBlockedCount = 0;
+  private adultBlockedCount = 0;
+  private resolvedCount = 0;
   private totalLatencyMs = 0;
   private startTime = Date.now();
-  private domainCounts: Record<string, number> = {};
-  private blockedDomainCounts: Record<string, number> = {};
-  private clientCounts: Record<string, number> = {};
+  private domainCounts = new Map<string, number>();
+  private blockedDomainCounts = new Map<string, number>();
+  private clientCounts = new Map<string, number>();
   private upstreamCounts: Record<string, { count: number; totalMs: number }> = {};
+  /** hour bucket (epoch hours) → counts, last 24 h only */
+  private hourly = new Map<number, { queries: number; blocked: number }>();
+
   private blockedServiceIds = new Set<string>();
   private dnsRewrites: DnsRewrite[] = [];
 
@@ -67,329 +158,315 @@ class DnsEngine {
 
   private blocklists: SubscribedList[] = [
     {
-      id: 'advguard-ultra',
-      name: 'AdvGuard Ultra Shield',
-      url: 'https://advgaurd.veerbhanushali.com/api/blocklists/download?id=advguard-ultra',
-      count: 184500,
+      id: 'advguard-starter',
+      name: 'AdvGuard Starter List (built-in)',
+      url: '/api/blocklists/download?id=advguard-starter',
+      count: DEFAULT_BLOCKED_DOMAINS.size,
       enabled: true,
-      category: 'Master Filter (by Veer)',
+      category: 'Ads & Trackers',
+      lastUpdated: Date.now(),
     },
-    {
-      id: 'advguard-telemetry',
-      name: 'AdvGuard Telemetry & Tracker Cleanse',
-      url: 'https://advgaurd.veerbhanushali.com/api/blocklists/download?id=advguard-telemetry',
-      count: 36200,
+    ...getRemoteListDefs().map((l) => ({
+      id: l.id,
+      name: l.name,
+      url: l.url,
+      count: 0,
       enabled: true,
-      category: 'Anti-Spy & Big Tech',
-    },
-    {
-      id: 'advguard-threats',
-      name: 'AdvGuard Threat & Malware Defense',
-      url: 'https://advgaurd.veerbhanushali.com/api/blocklists/download?id=advguard-threats',
-      count: 54100,
-      enabled: true,
-      category: 'Ransomware & Scams',
-    },
-    {
-      id: 'advguard-family',
-      name: 'AdvGuard SafeFamily Shield',
-      url: 'https://advgaurd.veerbhanushali.com/api/blocklists/download?id=advguard-family',
-      count: 28900,
-      enabled: true,
-      category: 'SafeSearch & Parental',
-    },
+      category: `${l.category} · ${l.license}`,
+    })),
   ];
 
-  private upstreams = [
-    'https://dns.quad9.net/dns-query',
-    'https://cloudflare-dns.com/dns-query',
-  ];
+  private upstreams = (process.env.UPSTREAM_DOH || 'https://dns.quad9.net/dns-query,https://cloudflare-dns.com/dns-query')
+    .split(',')
+    .map((u) => u.trim())
+    .filter((u) => /^https:\/\//.test(u));
 
   private constructor() {
-    this.initSampleStats();
-  }
-
-  private initSampleStats() {
-    this.totalQueries = 3120;
-    this.blockedQueries = 684;
-    this.domainCounts['doubleclick.net'] = 240;
-    this.domainCounts['google.com'] = 520;
-    this.domainCounts['github.com'] = 310;
-    this.domainCounts['google-analytics.com'] = 195;
-    this.domainCounts['criteo.com'] = 145;
-    this.domainCounts['youtube.com'] = 410;
-
-    this.blockedDomainCounts['doubleclick.net'] = 240;
-    this.blockedDomainCounts['google-analytics.com'] = 195;
-    this.blockedDomainCounts['criteo.com'] = 145;
-    this.blockedDomainCounts['pagead2.googlesyndication.com'] = 104;
-
-    this.clientCounts['10.38.8.52 (laptop)'] = 1840;
-    this.clientCounts['veer-phone (Android)'] = 980;
-    this.clientCounts['smart-tv (Living Room)'] = 300;
-
-    this.upstreamCounts['dns.quad9.net'] = { count: 1820, totalMs: 25480 };
-    this.upstreamCounts['cloudflare-dns.com'] = { count: 616, totalMs: 6776 };
+    if (this.blocklists.length > 1) {
+      // Fire-and-forget: the starter list protects immediately while big lists download.
+      setTimeout(() => this.refreshRemoteLists().catch(() => {}), 0).unref?.();
+      setInterval(() => this.refreshRemoteLists().catch(() => {}), LIST_REFRESH_MS).unref?.();
+    }
   }
 
   public static getInstance(): DnsEngine {
-    if (!DnsEngine.instance) {
-      DnsEngine.instance = new DnsEngine();
-    }
+    if (!DnsEngine.instance) DnsEngine.instance = new DnsEngine();
     return DnsEngine.instance;
   }
 
-  public isDomainBlocked(domain: string): { blocked: boolean; matchedDomain?: string } {
-    if (!this.protectionEnabled) {
-      return { blocked: false };
-    }
+  /* ------------------------------ Lists ------------------------------ */
 
+  private async refreshRemoteLists() {
+    for (const list of this.blocklists) {
+      if (!list.url.startsWith('https://')) continue;
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 60_000);
+        const res = await fetch(list.url, { signal: controller.signal, cache: 'no-store' });
+        clearTimeout(timer);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const len = Number(res.headers.get('content-length') || 0);
+        if (len > MAX_LIST_BYTES) throw new Error('List too large');
+        const text = await res.text();
+        if (text.length > MAX_LIST_BYTES) throw new Error('List too large');
+
+        const set = new Set<string>();
+        for (const line of text.split('\n')) {
+          const parsed = parseRule(line);
+          if (parsed && !parsed.isAllow) set.add(parsed.domain);
+        }
+        this.listDomains.set(list.id, set);
+        list.count = set.size;
+        list.lastUpdated = Date.now();
+        list.error = undefined;
+        console.log(`[advguard] loaded ${set.size.toLocaleString()} domains from ${list.name}`);
+      } catch (e: any) {
+        list.error = e?.name === 'AbortError' ? 'Timed out' : String(e?.message || 'Failed');
+        console.warn(`[advguard] failed to load ${list.name}: ${list.error}`);
+      }
+    }
+  }
+
+  private matchInSets(candidate: string): string | null {
+    if (this.customBlocked.has(candidate)) return 'Custom rule';
+    for (const list of this.blocklists) {
+      if (list.enabled && this.listDomains.get(list.id)?.has(candidate)) return list.name;
+    }
+    return null;
+  }
+
+  /* ----------------------------- Matching ---------------------------- */
+
+  public isDomainBlocked(domain: string): { blocked: boolean; matchedDomain?: string } {
+    if (!this.protectionEnabled) return { blocked: false };
     const clean = cleanDomain(domain);
 
-    // Whitelist check
-    if (this.allowedDomains.has(clean)) {
-      return { blocked: false };
-    }
+    if (this.isAllowed(clean)) return { blocked: false };
 
-    // Check Blocked Services (TikTok, Discord, YouTube, Facebook, etc.)
     if (this.blockedServiceIds.size > 0) {
       for (const service of BLOCKED_SERVICES) {
-        if (this.blockedServiceIds.has(service.id)) {
-          for (const sDomain of service.domains) {
-            if (clean === sDomain || clean.endsWith('.' + sDomain)) {
-              return { blocked: true, matchedDomain: `Blocked Service: ${service.name}` };
-            }
+        if (!this.blockedServiceIds.has(service.id)) continue;
+        for (const sDomain of service.domains) {
+          if (clean === sDomain || clean.endsWith('.' + sDomain)) {
+            return { blocked: true, matchedDomain: `Blocked Service: ${service.name}` };
           }
         }
       }
     }
 
-    // Exact check
-    if (this.blockedDomains.has(clean)) {
-      return { blocked: true, matchedDomain: clean };
-    }
-
-    // Subdomain walk: sub.ads.example.com -> ads.example.com -> example.com
+    // Walk from the full name up to the registrable parent: a.ads.example.com → ads.example.com → example.com
     const parts = clean.split('.');
-    for (let i = 1; i < parts.length - 1; i++) {
-      const parent = parts.slice(i).join('.');
-      if (this.allowedDomains.has(parent)) {
-        return { blocked: false };
-      }
-      if (this.blockedDomains.has(parent)) {
-        return { blocked: true, matchedDomain: parent };
-      }
+    for (let i = 0; i < parts.length - 1; i++) {
+      const candidate = parts.slice(i).join('.');
+      const hit = this.matchInSets(candidate);
+      if (hit) return { blocked: true, matchedDomain: `${candidate} (${hit})` };
     }
-
     return { blocked: false };
   }
 
-  public async handleDnsMessage(queryBuffer: Buffer, clientIp = '127.0.0.1'): Promise<Buffer> {
-    const start = Date.now();
-    let decoded: dnsPacket.Packet;
+  private isAllowed(clean: string): boolean {
+    if (this.allowedDomains.size === 0) return false;
+    const parts = clean.split('.');
+    for (let i = 0; i < parts.length - 1; i++) {
+      if (this.allowedDomains.has(parts.slice(i).join('.'))) return true;
+    }
+    return false;
+  }
 
+  /* ----------------------------- Resolving --------------------------- */
+
+  private reply(query: dnsPacket.Packet, rcode: number, answers: dnsPacket.Answer[] = []): Buffer {
+    const rd = (query.flags || 0) & dnsPacket.RECURSION_DESIRED;
+    return dnsPacket.encode({
+      type: 'response',
+      id: query.id,
+      flags: rd | dnsPacket.RECURSION_AVAILABLE | rcode,
+      questions: query.questions,
+      answers,
+    });
+  }
+
+  private blockedReply(query: dnsPacket.Packet, qName: string, qType: string): Buffer {
+    // Null-IP for A/AAAA (fastest for clients), NODATA for everything else.
+    const answers: dnsPacket.Answer[] = [];
+    if (qType === 'A') answers.push({ type: 'A', name: qName, ttl: BLOCK_TTL, data: '0.0.0.0' });
+    if (qType === 'AAAA') answers.push({ type: 'AAAA', name: qName, ttl: BLOCK_TTL, data: '::' });
+    return this.reply(query, RCODE.NOERROR, answers);
+  }
+
+  private async forward(queryBuffer: Buffer): Promise<{ buf: Buffer; upstream: string } | null> {
+    for (const upstream of this.upstreams) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 2500);
+      try {
+        const res = await fetch(upstream, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/dns-message', Accept: 'application/dns-message' },
+          body: new Uint8Array(queryBuffer),
+          signal: controller.signal,
+          cache: 'no-store',
+        });
+        if (!res.ok) continue;
+        const ab = await res.arrayBuffer();
+        if (ab.byteLength === 0 || ab.byteLength > MAX_UPSTREAM_BYTES) continue;
+        return { buf: Buffer.from(ab), upstream: new URL(upstream).host };
+      } catch {
+        continue;
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    return null;
+  }
+
+  public async handleDnsMessage(queryBuffer: Buffer, ctx: DnsRequestContext): Promise<DnsResult> {
+    const start = Date.now();
+    let query: dnsPacket.Packet;
     try {
-      decoded = dnsPacket.decode(queryBuffer);
+      query = dnsPacket.decode(queryBuffer);
     } catch {
-      return Buffer.alloc(0);
+      throw new DnsFormatError();
+    }
+    if (query.type !== 'query' || !query.questions || query.questions.length !== 1) {
+      return { response: this.reply(query, RCODE.FORMERR), ttl: 0 };
     }
 
-    const question = decoded.questions?.[0];
-    const qName = question?.name || '';
-    const qType = question?.type || 'A';
+    const question = query.questions[0];
+    const qName = question.name || '';
+    const qType = String(question.type || 'A');
     const domain = cleanDomain(qName);
+    const clientLabel = ctx.clientId ? `${ctx.clientId} (${displayIp(ctx.ip)})` : displayIp(ctx.ip);
+
+    // RFC 8482: refuse ANY – it is only ever used for amplification and enumeration.
+    if (qType === 'ANY') return { response: this.reply(query, RCODE.NOTIMP), ttl: 0 };
+
+    const device = ctx.clientId ? userManager.getDeviceByToken(ctx.clientId) : undefined;
+    if (device && device.status === 'revoked') return { response: this.reply(query, RCODE.REFUSED), ttl: 0 };
 
     this.totalQueries++;
-    this.domainCounts[domain] = (this.domainCounts[domain] || 0) + 1;
-    this.clientCounts[clientIp] = (this.clientCounts[clientIp] || 0) + 1;
+    bump(this.domainCounts, domain);
+    bump(this.clientCounts, clientLabel);
 
-    // 1. Check Smart Firewall (Anti-DDoS, High-Risk TLDs, AI Scrapers, Cryptominers)
-    const fwCheck = firewallEngine.inspectDomain(domain, clientIp);
-    if (fwCheck.blocked) {
-      this.blockedQueries++;
-      this.blockedDomainCounts[domain] = (this.blockedDomainCounts[domain] || 0) + 1;
-
-      const elapsed = Date.now() - start;
-      const logEntry: QueryLogEntry = {
-        id: Math.random().toString(36).substring(2, 9),
-        timestamp: Date.now(),
-        domain,
-        type: qType,
-        clientIp,
-        blocked: true,
-        ruleMatched: fwCheck.reason,
-        elapsedMs: elapsed,
-      };
-      this.recordLog(logEntry);
-
-      return dnsPacket.encode({
-        type: 'response',
-        id: decoded.id,
-        flags: dnsPacket.RECURSION_DESIRED | dnsPacket.RECURSION_AVAILABLE,
-        questions: decoded.questions,
-        answers: qType === 'A' ? [{ type: 'A', name: qName, ttl: 300, data: '0.0.0.0' }] : [],
-      });
-    }
-
-    // 2. Check DNS Rewrites
-    const rewrite = this.dnsRewrites.find((r) => r.domain === domain);
-    if (rewrite && (qType === 'A' || qType === 'AAAA')) {
-      return dnsPacket.encode({
-        type: 'response',
-        id: decoded.id,
-        flags: dnsPacket.RECURSION_DESIRED | dnsPacket.RECURSION_AVAILABLE,
-        questions: decoded.questions,
-        answers: [
-          {
-            type: qType,
-            name: qName,
-            ttl: 300,
-            data: rewrite.answer,
-          },
-        ],
-      });
-    }
-
-    // 3. Check Blocklists & Custom Rules
-    const blockCheck = this.isDomainBlocked(domain);
-
-    if (blockCheck.blocked) {
-      this.blockedQueries++;
-      this.blockedDomainCounts[domain] = (this.blockedDomainCounts[domain] || 0) + 1;
-
-      const elapsed = Date.now() - start;
-      const logEntry: QueryLogEntry = {
-        id: Math.random().toString(36).substring(2, 9),
-        timestamp: Date.now(),
-        domain,
-        type: qType,
-        clientIp,
-        blocked: true,
-        ruleMatched: blockCheck.matchedDomain,
-        elapsedMs: elapsed,
-      };
-      this.recordLog(logEntry);
-
-      // Instant AdBlock Response
-      const answers: dnsPacket.Answer[] = [];
-      if (qType === 'A') {
-        answers.push({
-          type: 'A',
-          name: qName,
-          ttl: 300,
-          data: '0.0.0.0',
-        });
-      } else if (qType === 'AAAA') {
-        answers.push({
-          type: 'AAAA',
-          name: qName,
-          ttl: 300,
-          data: '::',
-        });
-      }
-
-      return dnsPacket.encode({
-        type: 'response',
-        id: decoded.id,
-        flags: dnsPacket.RECURSION_DESIRED | dnsPacket.RECURSION_AVAILABLE,
-        questions: decoded.questions,
-        answers,
-      });
-    }
-
-    // 4. Check Fast In-Memory Cache (<0.1ms)
-    const cachedBase64 = await cloudStorage.getCachedDns(domain, qType);
-    if (cachedBase64) {
-      try {
-        const cachedBuf = Buffer.from(cachedBase64, 'base64');
-        const cachedDecoded = dnsPacket.decode(cachedBuf);
-        cachedDecoded.id = decoded.id;
-        const finalBuf = dnsPacket.encode(cachedDecoded);
-
-        this.recordLog({
-          id: Math.random().toString(36).substring(2, 9),
+    const log = (blocked: boolean, extra: Partial<QueryLogEntry>) =>
+      this.recordLog(
+        {
+          id: newId(),
           timestamp: Date.now(),
           domain,
           type: qType,
-          clientIp,
-          blocked: false,
+          clientIp: clientLabel,
+          blocked,
           elapsedMs: Date.now() - start,
-          upstream: 'AdvGuard RAM Cache',
-        });
+          ...extra,
+        },
+        ctx.clientId
+      );
 
-        return finalBuf;
-      } catch {
-        // proceed
-      }
+    const blocked = (reason: string, kind?: 'malware' | 'adult') => {
+      this.blockedQueries++;
+      if (kind === 'malware') this.malwareBlockedCount++;
+      if (kind === 'adult') this.adultBlockedCount++;
+      bump(this.blockedDomainCounts, domain);
+      log(true, { ruleMatched: reason });
+      return { response: this.blockedReply(query, qName, qType), ttl: BLOCK_TTL };
+    };
+
+    const paused = device?.status === 'paused';
+    const filtering = this.protectionEnabled && !paused;
+    const allowed = this.isAllowed(domain);
+
+    // 1. Smart firewall (user allowlist always wins)
+    if (filtering && !allowed && this.safeBrowsingEnabled) {
+      const fw = firewallEngine.inspectDomain(domain);
+      if (fw.blocked) return blocked(fw.reason || 'Firewall', 'malware');
     }
 
-    // 5. Forward to Upstream DoH
-    let upstreamRes: Response | null = null;
-    let chosenUpstream = this.upstreams[0];
+    // 2. DNS rewrites
+    const rewrite = this.dnsRewrites.find((r) => r.domain === domain);
+    if (rewrite) {
+      const family = isIP(rewrite.answer);
+      const answers: dnsPacket.Answer[] = [];
+      if (family === 4 && qType === 'A') answers.push({ type: 'A', name: qName, ttl: 300, data: rewrite.answer });
+      else if (family === 6 && qType === 'AAAA') answers.push({ type: 'AAAA', name: qName, ttl: 300, data: rewrite.answer });
+      else if (family === 0 && (qType === 'A' || qType === 'AAAA' || qType === 'CNAME'))
+        answers.push({ type: 'CNAME', name: qName, ttl: 300, data: rewrite.answer });
+      log(false, { upstream: 'Rewrite', ruleMatched: `Rewrite → ${rewrite.answer}` });
+      return { response: this.reply(query, RCODE.NOERROR, answers), ttl: 300 };
+    }
 
-    for (const upstream of this.upstreams) {
-      try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 2000);
+    // 3. Blocklists, services, custom rules
+    if (filtering) {
+      const check = this.isDomainBlocked(domain);
+      if (check.blocked) return blocked(check.matchedDomain || 'Blocklist');
+    }
 
-        upstreamRes = await fetch(upstream, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/dns-message',
-            Accept: 'application/dns-message',
-          },
-          body: new Uint8Array(queryBuffer),
-          signal: controller.signal,
+    // 4. SafeSearch (CNAME to the provider's enforced endpoint)
+    if (filtering && this.safeSearchEnabled && (qType === 'A' || qType === 'AAAA')) {
+      const target = SAFE_SEARCH_CNAMES[domain];
+      if (target) {
+        const sub = dnsPacket.encode({
+          type: 'query',
+          id: 0,
+          flags: dnsPacket.RECURSION_DESIRED,
+          questions: [{ type: qType as any, name: target }],
         });
-        clearTimeout(timeout);
-
-        if (upstreamRes.ok) {
-          chosenUpstream = upstream;
-          break;
+        const res = await this.forward(sub);
+        if (res) {
+          const decoded = dnsPacket.decode(res.buf);
+          const answers: dnsPacket.Answer[] = [
+            { type: 'CNAME', name: qName, ttl: 300, data: target },
+            ...(decoded.answers || []),
+          ];
+          this.adultBlockedCount++;
+          log(false, { upstream: res.upstream, ruleMatched: `SafeSearch → ${target}` });
+          return { response: this.reply(query, RCODE.NOERROR, answers), ttl: 300 };
         }
-      } catch {
-        continue;
       }
     }
 
+    // 5. In-memory cache
+    const cached = await cloudStorage.getCachedDns(domain, qType);
+    if (cached) {
+      try {
+        const packet = dnsPacket.decode(Buffer.from(cached, 'base64'));
+        packet.id = query.id;
+        log(false, { upstream: 'RAM cache' });
+        return { response: dnsPacket.encode(packet), ttl: minTtl(packet) };
+      } catch {
+        /* fall through to upstream */
+      }
+    }
+
+    // 6. Upstream DoH
+    const res = await this.forward(queryBuffer);
     const elapsed = Date.now() - start;
+    if (!res) {
+      log(false, { upstream: 'none', ruleMatched: 'SERVFAIL: all upstreams failed' });
+      return { response: this.reply(query, RCODE.SERVFAIL), ttl: 0 };
+    }
+
+    let ttl = 60;
+    try {
+      const decoded = dnsPacket.decode(res.buf);
+      ttl = minTtl(decoded);
+      const rcode = (decoded.flags || 0) & 0xf;
+      if (decoded.id === query.id && (rcode === RCODE.NOERROR || rcode === RCODE.NXDOMAIN) && !(decoded.flags! & 0x200)) {
+        cloudStorage.setCachedDns(domain, qType, res.buf.toString('base64'), ttl).catch(() => {});
+      }
+    } catch {
+      return { response: this.reply(query, RCODE.SERVFAIL), ttl: 0 };
+    }
+
+    this.resolvedCount++;
     this.totalLatencyMs += elapsed;
-
-    const upstreamHost = chosenUpstream.replace('https://', '').split('/')[0];
-    if (!this.upstreamCounts[upstreamHost]) {
-      this.upstreamCounts[upstreamHost] = { count: 0, totalMs: 0 };
-    }
-    this.upstreamCounts[upstreamHost].count++;
-    this.upstreamCounts[upstreamHost].totalMs += elapsed;
-
-    if (upstreamRes && upstreamRes.ok) {
-      const arrayBuf = await upstreamRes.arrayBuffer();
-      const resBuffer = Buffer.from(arrayBuf);
-
-      cloudStorage.setCachedDns(domain, qType, resBuffer.toString('base64'), 300).catch(() => {});
-
-      this.recordLog({
-        id: Math.random().toString(36).substring(2, 9),
-        timestamp: Date.now(),
-        domain,
-        type: qType,
-        clientIp,
-        blocked: false,
-        elapsedMs: elapsed,
-        upstream: upstreamHost,
-      });
-
-      return resBuffer;
-    }
-
-    return dnsPacket.encode({
-      type: 'response',
-      id: decoded.id,
-      flags: dnsPacket.RECURSION_DESIRED | dnsPacket.RECURSION_AVAILABLE,
-      questions: decoded.questions,
-      answers: [],
-    });
+    const u = (this.upstreamCounts[res.upstream] ||= { count: 0, totalMs: 0 });
+    u.count++;
+    u.totalMs += elapsed;
+    log(false, { upstream: res.upstream });
+    return { response: res.buf, ttl };
   }
+
+  /* --------------------------- Admin actions -------------------------- */
 
   public setProtection(enabled: boolean) {
     this.protectionEnabled = enabled;
@@ -403,21 +480,22 @@ class DnsEngine {
     this.safeBrowsingEnabled = enabled;
   }
 
-  public toggleBlockedService(serviceId: string, enabled: boolean) {
-    if (enabled) {
-      this.blockedServiceIds.add(serviceId);
-    } else {
-      this.blockedServiceIds.delete(serviceId);
-    }
+  public toggleBlockedService(serviceId: string, enabled: boolean): boolean {
+    if (!BLOCKED_SERVICES.some((s) => s.id === serviceId)) return false;
+    if (enabled) this.blockedServiceIds.add(serviceId);
+    else this.blockedServiceIds.delete(serviceId);
+    return true;
   }
 
-  public addRewrite(domain: string, answer: string) {
-    this.dnsRewrites = this.dnsRewrites.filter((r) => r.domain !== cleanDomain(domain));
-    this.dnsRewrites.push({
-      id: Math.random().toString(36).substring(2, 9),
-      domain: cleanDomain(domain),
-      answer: answer.trim(),
-    });
+  public addRewrite(domainRaw: string, answerRaw: string): boolean {
+    const domain = cleanDomain(domainRaw);
+    const answer = answerRaw.trim().toLowerCase();
+    if (!isValidHostname(domain)) return false;
+    if (!isIP(answer) && !isValidHostname(answer)) return false;
+    if (this.dnsRewrites.length >= 1000) return false;
+    this.dnsRewrites = this.dnsRewrites.filter((r) => r.domain !== domain);
+    this.dnsRewrites.push({ id: newId(), domain, answer });
+    return true;
   }
 
   public deleteRewrite(id: string) {
@@ -425,41 +503,29 @@ class DnsEngine {
   }
 
   public addRule(ruleStr: string): boolean {
+    if (ruleStr.length > 300 || this.customRules.length >= 10_000) return false;
     const parsed = parseRule(ruleStr);
-    if (!parsed) return false;
-
-    if (parsed.isAllow) {
-      this.allowedDomains.add(parsed.domain);
-    } else {
-      this.blockedDomains.add(parsed.domain);
-    }
-
+    if (!parsed || !isValidHostname(parsed.domain)) return false;
+    (parsed.isAllow ? this.allowedDomains : this.customBlocked).add(parsed.domain);
     this.customRules.push({
-      id: Math.random().toString(36).substring(2, 9),
-      pattern: ruleStr,
+      id: newId(),
+      pattern: ruleStr.trim(),
       type: parsed.isAllow ? 'allow' : 'block',
       enabled: true,
       createdAt: Date.now(),
     });
-
     return true;
   }
 
   public deleteRule(id: string): boolean {
-    const ruleIndex = this.customRules.findIndex((r) => r.id === id);
-    if (ruleIndex === -1) return false;
-
-    const rule = this.customRules[ruleIndex];
+    const idx = this.customRules.findIndex((r) => r.id === id);
+    if (idx === -1) return false;
+    const [rule] = this.customRules.splice(idx, 1);
     const parsed = parseRule(rule.pattern);
     if (parsed) {
-      if (parsed.isAllow) {
-        this.allowedDomains.delete(parsed.domain);
-      } else {
-        this.blockedDomains.delete(parsed.domain);
-      }
+      const stillUsed = this.customRules.some((r) => parseRule(r.pattern)?.domain === parsed.domain && r.type === rule.type);
+      if (!stillUsed) (parsed.isAllow ? this.allowedDomains : this.customBlocked).delete(parsed.domain);
     }
-
-    this.customRules.splice(ruleIndex, 1);
     return true;
   }
 
@@ -474,51 +540,34 @@ class DnsEngine {
     return this.blocklists;
   }
 
+  /* ------------------------------ Stats ------------------------------ */
+
   public getFullStats(): AdGuardFullStats {
     const uptime = Math.floor((Date.now() - this.startTime) / 1000);
     const pct = this.totalQueries > 0 ? (this.blockedQueries / this.totalQueries) * 100 : 0;
-    const avgLatency = this.totalQueries > 0 ? Math.round(this.totalLatencyMs / Math.max(1, this.totalQueries - this.blockedQueries)) : 14;
-
-    const topDomains = Object.entries(this.domainCounts)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 6)
-      .map(([domain, count]) => ({ domain, count }));
-
-    const topBlockedDomains = Object.entries(this.blockedDomainCounts)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 6)
-      .map(([domain, count]) => ({ domain, count }));
-
-    const topClients = Object.entries(this.clientCounts)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 6)
-      .map(([client, count]) => ({ client, count }));
 
     const topUpstreams = Object.entries(this.upstreamCounts)
       .sort((a, b) => b[1].count - a[1].count)
-      .map(([upstream, data]) => ({
-        upstream,
-        count: data.count,
-        avgMs: Math.round(data.totalMs / Math.max(1, data.count)),
-      }));
+      .map(([upstream, d]) => ({ upstream, count: d.count, avgMs: Math.round(d.totalMs / Math.max(1, d.count)) }));
 
     const totalBlocklistRules = this.blocklists.reduce((acc, b) => acc + (b.enabled ? b.count : 0), 0);
 
-    const hours = ['00:00', '03:00', '06:00', '09:00', '12:00', '15:00', '18:00', '21:00'];
-    const chartData = hours.map((time, idx) => ({
-      time,
-      queries: Math.round(180 + Math.sin(idx * 0.8) * 90 + (idx === 7 ? this.totalQueries % 100 : 30)),
-      blocked: Math.round(40 + Math.sin(idx * 0.8) * 20 + (idx === 7 ? this.blockedQueries % 30 : 10)),
-    }));
+    const nowHour = Math.floor(Date.now() / 3_600_000);
+    const chartData = Array.from({ length: 24 }, (_, i) => {
+      const h = nowHour - 23 + i;
+      const b = this.hourly.get(h) || { queries: 0, blocked: 0 };
+      const label = new Date(h * 3_600_000).toISOString().slice(11, 16);
+      return { time: `${label} UTC`, queries: b.queries, blocked: b.blocked };
+    });
 
     return {
       totalQueries: this.totalQueries,
       blockedQueries: this.blockedQueries,
       blockedPercentage: parseFloat(pct.toFixed(1)),
       uptimeSeconds: uptime,
-      topDomains,
-      topBlockedDomains,
-      topClients,
+      topDomains: top(this.domainCounts, 6, 'domain'),
+      topBlockedDomains: top(this.blockedDomainCounts, 6, 'domain'),
+      topClients: top(this.clientCounts, 6, 'client'),
       topUpstreams,
       chartData,
       rulesCount: totalBlocklistRules + this.customRules.length,
@@ -527,13 +576,10 @@ class DnsEngine {
       safeBrowsingEnabled: this.safeBrowsingEnabled,
       malwareBlockedCount: this.malwareBlockedCount,
       adultBlockedCount: this.adultBlockedCount,
-      avgLatencyMs: avgLatency || 14,
+      avgLatencyMs: this.resolvedCount ? Math.round(this.totalLatencyMs / this.resolvedCount) : 0,
       rewrites: this.dnsRewrites,
       blockedServiceIds: Array.from(this.blockedServiceIds),
-      firewall: {
-        blocksCount: firewallEngine.getBlocksCount(),
-        config: firewallEngine.getConfig(),
-      },
+      firewall: { blocksCount: firewallEngine.getBlocksCount(), config: firewallEngine.getConfig() },
       curatedLists: CURATED_ADVGUARD_LISTS,
       devices: userManager.getDevices(),
       users: userManager.getUsers(),
@@ -552,14 +598,27 @@ class DnsEngine {
     this.logs = [];
   }
 
-  private recordLog(entry: QueryLogEntry) {
+  private recordLog(entry: QueryLogEntry, clientId?: string) {
     this.logs.unshift(entry);
-    if (this.logs.length > 500) {
-      this.logs.pop();
+    if (this.logs.length > 500) this.logs.pop();
+
+    const hour = Math.floor(entry.timestamp / 3_600_000);
+    const b = this.hourly.get(hour) || { queries: 0, blocked: 0 };
+    b.queries++;
+    if (entry.blocked) b.blocked++;
+    this.hourly.set(hour, b);
+    if (this.hourly.size > 25) {
+      for (const h of this.hourly.keys()) if (h < hour - 23) this.hourly.delete(h);
     }
-    // Track device activity
-    userManager.recordDeviceActivity(entry.clientIp, entry.blocked);
+
+    userManager.recordDeviceActivity(clientId, entry.blocked);
     cloudStorage.saveQueryLog(entry).catch(() => {});
+  }
+}
+
+export class DnsFormatError extends Error {
+  constructor() {
+    super('Malformed DNS message');
   }
 }
 

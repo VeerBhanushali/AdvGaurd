@@ -4,6 +4,35 @@ All notable changes to the **AdvGuard** project are documented in this file.
 
 ---
 
+## [v1.2.0] - 2026-11-09
+
+### Security (breaking for insecure setups)
+* **Admin auth is now fail-closed.** Previously, an unset `ADMIN_PASSWORD` made *every visitor* an admin. Production now requires a password of 12+ characters.
+* Login returns a signed 12 h session token. The password is no longer stored in `localStorage`. Logins are limited to 5 attempts / 15 min, and passwords are compared in constant time.
+* **Supabase schema locked down.** The "Anon Full Access" RLS policies (which let anyone with the public anon key read every query log) are dropped. The server now uses `SUPABASE_SERVICE_ROLE_KEY`. **Re-run `supabase-schema.sql`.**
+* Added `firestore.rules`, which makes Firestore logs write-only.
+* Client IPs are read from the right of `X-Forwarded-For` (`TRUSTED_PROXY_HOPS`), so the rate limit can no longer be bypassed by spoofing the header.
+* The rate limiter is now a bounded sliding window that answers HTTP 429.
+* DoH input limits: 4 KB max, strict base64url, content-type checks. `ANY` queries are refused.
+* IPs are anonymised before they reach in-memory logs and stats, not only the DB. Fixed IPv6 masking, which was `/48` and broken for compressed addresses.
+* Validated inputs on all admin actions; generic error messages.
+* Added security headers (CSP, HSTS, X-Frame-Options); `server.js` now has request timeouts.
+* iOS profile: Host-header/XML injection fixed; `PUBLIC_HOSTNAME` support; per-device profiles.
+* Device registration: rate-limited, capped, and tokens get a random suffix.
+
+### Accuracy
+* Removed fabricated demo data: seeded query counts, fake devices, fake e-mail, sine-wave chart and inflated "290,000+" list counts. All numbers shown are now real.
+* Added real blocklist sync: HaGeZi Multi PRO (~220k domains), refreshed daily. `BLOCKLIST_URLS` lets you bring your own lists.
+* SafeSearch and Safe-Browsing toggles now actually do something.
+* Threat-level presets now change the firewall configuration.
+* Removed `.xyz` and `.link` from the risky TLD list (they broke legitimate sites such as abc.xyz).
+* Renamed "AI scraper blocking" to "AI assistant services". DNS can't stop crawlers scraping your site.
+* Android guide: native Private DNS needs DoT. Documented DoH apps (Intra / RethinkDNS) instead.
+* Upstream failures now return `SERVFAIL` (was an empty `NOERROR`). Cache TTL and `Cache-Control` follow record TTLs.
+* Removed the unused `@upstash/redis` dependency.
+
+---
+
 ## [v1.1.0] - 2026-11-10
 
 ### 🛡️ Enterprise Security, Zero-PII Privacy & Cloud Automation

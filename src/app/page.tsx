@@ -143,6 +143,27 @@ interface CloudStatus {
   mode: string;
 }
 
+// Admin session: a short-lived signed token from the server, kept in
+// sessionStorage (cleared when the tab closes). The password is never stored.
+const SESSION_KEY = 'advguard-admin-session';
+function getSessionToken(): string {
+  try {
+    return sessionStorage.getItem(SESSION_KEY) || '';
+  } catch {
+    return '';
+  }
+}
+function setSessionToken(token: string) {
+  try {
+    sessionStorage.setItem(SESSION_KEY, token);
+  } catch {}
+}
+function clearSessionToken() {
+  try {
+    sessionStorage.removeItem(SESSION_KEY);
+  } catch {}
+}
+
 export default function AdvGuardApp() {
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
   const [stats, setStats] = useState<Stats>({
@@ -232,20 +253,27 @@ export default function AdvGuardApp() {
   const [isVerifying, setIsVerifying] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [detectedOs, setDetectedOs] = useState('');
+  const [adminHint, setAdminHint] = useState('');
+  const [registeredToken, setRegisteredToken] = useState('');
 
-  const PUBLIC_DOMAIN = 'advgaurd.veerbhanushali.com';
+  // Use the host the dashboard is served from, so self-hosted instances show their own endpoint.
+  const PUBLIC_DOMAIN = hostUrl ? hostUrl.replace(/^https?:\/\//, '') : 'advgaurd.veerbhanushali.com';
 
   const fetchStats = async () => {
     try {
-      const key = localStorage.getItem('advguard-admin-key') || adminKey || '';
+      const key = getSessionToken() || adminKey || '';
       const res = await fetch('/api/stats', {
         headers: key ? { 'x-admin-key': key } : {},
+        cache: 'no-store',
       });
       if (res.ok) {
         const data = await res.json();
-        setStats(data.stats);
+        // Public responses only carry a subset of fields – keep defaults for the rest.
+        setStats((prev) => ({ ...prev, ...data.stats }));
         setHasAdminPassword(!!data.hasAdminPassword);
+        setAdminHint(data.adminHint || '');
         setIsAdminUnlocked(!!data.isAdmin);
+        if (!data.isAdmin && key) clearSessionToken();
         if (data.isAdmin) {
           setLogs(data.logs || []);
           setRules(data.rules || []);
@@ -268,10 +296,11 @@ export default function AdvGuardApp() {
     const savedTheme = localStorage.getItem('advguard-theme') as 'dark' | 'light' | null;
     if (savedTheme) setTheme(savedTheme);
 
-    const savedKey = localStorage.getItem('advguard-admin-key');
+    // Remove the plaintext password stored by older versions.
+    try { localStorage.removeItem('advguard-admin-key'); } catch {}
+    const savedKey = getSessionToken();
     if (savedKey) {
       setAdminKey(savedKey);
-      setIsAdminUnlocked(true);
     } else {
       setActiveNav('guide');
     }
@@ -312,7 +341,7 @@ export default function AdvGuardApp() {
   };
 
   const authPost = async (action: string, payload: any = {}) => {
-    const key = localStorage.getItem('advguard-admin-key') || adminKey || '';
+    const key = getSessionToken() || adminKey || '';
     try {
       const res = await fetch('/api/stats', {
         method: 'POST',
@@ -344,14 +373,18 @@ export default function AdvGuardApp() {
         body: JSON.stringify({ action: 'verify-admin', password: loginPasswordInput }),
       });
       const data = await res.json();
-      if (data.success) {
-        localStorage.setItem('advguard-admin-key', loginPasswordInput);
-        setAdminKey(loginPasswordInput);
+      if (data.success && data.token) {
+        setSessionToken(data.token);
+        setAdminKey(data.token);
         setIsAdminUnlocked(true);
         setShowLoginModal(false);
         setLoginPasswordInput('');
         setActiveNav('dashboard');
         fetchStats();
+      } else if (res.status === 429) {
+        setLoginError('Too many attempts. Please wait a few minutes and try again.');
+      } else if (data.adminHint) {
+        setLoginError(data.adminHint);
       } else {
         setLoginError('Incorrect admin passcode. Access denied.');
       }
@@ -363,7 +396,7 @@ export default function AdvGuardApp() {
   };
 
   const handleAdminLogout = () => {
-    localStorage.removeItem('advguard-admin-key');
+    clearSessionToken();
     setAdminKey('');
     setIsAdminUnlocked(false);
     setActiveNav('guide');
@@ -384,11 +417,13 @@ export default function AdvGuardApp() {
   const registerDevice = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newDevName.trim() || !newDevToken.trim()) return;
-    await fetch('/api/stats', {
+    const res = await fetch('/api/stats', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'register-device', name: newDevName, token: newDevToken }),
     });
+    const data = await res.json().catch(() => ({}));
+    setRegisteredToken(data?.device?.token || '');
     setNewDevName('');
     setNewDevToken('');
     setShowAddDeviceModal(false);
@@ -735,8 +770,8 @@ export default function AdvGuardApp() {
                 Zero Setup? Connect to <span className="text-emerald-500">advgaurd.veerbhanushali.com</span>
               </h2>
               <p className={`text-xs sm:text-sm max-w-2xl ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-                You don’t even need to host your own server. Paste our public DNS endpoint into your phone’s Private DNS or
-                mobile VPN app, and all ads and trackers will be blocked automatically anywhere in the world!
+                You don’t need to host your own server. Add this DNS-over-HTTPS endpoint to your iPhone (1-click profile),
+                Windows 11, macOS or browser, and ads, trackers and malware domains are blocked on every network.
               </p>
             </div>
 
@@ -856,7 +891,7 @@ export default function AdvGuardApp() {
                 <div className="text-3xl font-black font-mono text-amber-500">
                   {stats.firewall.blocksCount.toLocaleString()}
                 </div>
-                <div className="text-xs text-slate-500 mt-2">Spam TLDs, AI Scrapers, Miners</div>
+                <div className="text-xs text-slate-500 mt-2">Risky TLDs, cryptominers, AI-service policy</div>
                 <div className="w-full bg-slate-200 dark:bg-slate-800 h-1.5 rounded-full mt-2.5 overflow-hidden">
                   <div className="bg-amber-500 h-full w-2/5 rounded-full" />
                 </div>
@@ -875,7 +910,7 @@ export default function AdvGuardApp() {
                 <div className={`text-3xl font-black font-mono ${isDark ? 'text-white' : 'text-slate-900'}`}>
                   {stats.rulesCount.toLocaleString()}
                 </div>
-                <div className="text-xs text-slate-500 mt-2">AdvGuard Ultra + Custom Filters</div>
+                <div className="text-xs text-slate-500 mt-2">Blocklists + custom rules</div>
               </div>
             </div>
 
@@ -1245,7 +1280,7 @@ export default function AdvGuardApp() {
                   <div className="space-y-0.5">
                     <div className="font-bold text-xs text-white dark:text-white">Block High-Risk Spam TLDs</div>
                     <div className="text-[11px] text-slate-500">
-                      Drops queries to `.top`, `.xyz`, `.work`, `.click`, `.surf` known for malware.
+                      Drops queries to high-abuse TLDs such as `.top`, `.work`, `.click`, `.buzz`, `.cfd`, `.loan`, `.gdn`.
                     </div>
                   </div>
                   <button
@@ -1265,9 +1300,9 @@ export default function AdvGuardApp() {
                   }`}
                 >
                   <div className="space-y-0.5">
-                    <div className="font-bold text-xs text-white dark:text-white">Block AI Scrapers & Harvesters</div>
+                    <div className="font-bold text-xs text-white dark:text-white">Block AI Assistant Services</div>
                     <div className="text-[11px] text-slate-500">
-                      Blocks OpenAI, Anthropic, Common Crawl, and ByteDance web scrapers.
+                      Stops devices on this resolver from reaching ChatGPT, Claude, Gemini, Perplexity &amp; similar (school / work policy). Note: DNS cannot stop crawlers scraping your own website – use robots.txt or a WAF for that.
                     </div>
                   </div>
                   <button
@@ -1631,6 +1666,14 @@ export default function AdvGuardApp() {
                 </button>
               </div>
 
+              {registeredToken && (
+                <div className="p-3 rounded-xl border border-emerald-500/30 bg-emerald-500/10 text-xs space-y-1">
+                  <div className="font-bold text-emerald-500">Device registered</div>
+                  <div className="font-mono break-all">https://{PUBLIC_DOMAIN}/dns-query/{registeredToken}</div>
+                  <div className="text-slate-500">A random suffix was added so the token cannot be guessed. Keep this URL private.</div>
+                </div>
+              )}
+
               {/* Devices Table */}
               <div className="space-y-3">
                 <h4 className="text-xs font-bold uppercase text-slate-400">Connected Device Profiles ({stats.devices.length})</h4>
@@ -1696,7 +1739,7 @@ export default function AdvGuardApp() {
                         <input
                           type="text"
                           value={newDevToken}
-                          onChange={(e) => setNewDevToken(e.target.value.toLowerCase().replace(/[^a-z0-9-_]/g, ''))}
+                          onChange={(e) => setNewDevToken(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 40))}
                           placeholder="e.g. sister-phone"
                           className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs text-white font-mono"
                         />
@@ -1757,7 +1800,7 @@ export default function AdvGuardApp() {
                   </div>
 
                   <div className="p-4 bg-slate-950 rounded-xl border border-slate-800 space-y-2">
-                    <span className="font-bold text-xs text-sky-400">Android Private DNS Hostname:</span>
+                    <span className="font-bold text-xs text-sky-400">Android Private DNS Hostname (needs DoT on port 853 – VPS deployments only):</span>
                     <div className="flex items-center gap-2 bg-slate-900 p-2 rounded-lg border border-slate-800 font-mono text-xs">
                       <code className="text-sky-400 flex-1 truncate select-all">advgaurd.veerbhanushali.com</code>
                       <button
@@ -1789,7 +1832,7 @@ export default function AdvGuardApp() {
                     1. Open this website in Safari on your iPhone or iPad.
                   </p>
                   <p className="text-xs text-slate-300">
-                    2. Click the button below to download the signed `.mobileconfig` profile:
+                    2. Download the `.mobileconfig` profile below, then open <strong>Settings › Profile Downloaded</strong> and install it. iOS labels it “Unverified” because it is not code-signed – that is expected.
                   </p>
                   <a
                     href="/api/mobileconfig"
@@ -1813,18 +1856,30 @@ export default function AdvGuardApp() {
                     Android Setup (5G & Wi-Fi)
                   </h3>
                   <p className="text-xs text-slate-500">
-                    System-wide ad-blocking across all Android apps, browsers, and mobile games.
+                    Android&apos;s built-in Private DNS speaks DNS-over-TLS (port 853), not DNS-over-HTTPS. Use one of the options below.
                   </p>
                 </div>
 
                 <div className="p-5 bg-slate-950 rounded-xl border border-slate-800 space-y-3 text-xs text-slate-300">
-                  <div className="font-bold text-emerald-400">Method 1: Native Private DNS (Recommended)</div>
-                  <p>1. Go to <strong>Settings &gt; Network &amp; internet &gt; Private DNS</strong>.</p>
-                  <p>2. Select <strong>Private DNS provider hostname</strong>.</p>
-                  <p>3. Enter:</p>
+                  <div className="font-bold text-emerald-400">Method 1: System-wide via a DoH app (works everywhere)</div>
+                  <p>1. Install a free open-source DoH client such as <strong>Intra</strong> or <strong>RethinkDNS</strong>.</p>
+                  <p>2. Choose <strong>Custom DNS-over-HTTPS</strong> and paste:</p>
                   <code className="block bg-slate-900 p-2 rounded text-emerald-400 font-mono select-all">
-                    advgaurd.veerbhanushali.com
+                    https://{PUBLIC_DOMAIN}/dns-query
                   </code>
+                </div>
+
+                <div className="p-5 bg-slate-950 rounded-xl border border-slate-800 space-y-3 text-xs text-slate-300">
+                  <div className="font-bold text-emerald-400">Method 2: Browser only (Chrome / Brave / Firefox)</div>
+                  <p>Settings › Privacy &amp; security › Use secure DNS › Custom, then paste the URL above.</p>
+                </div>
+
+                <div className="p-5 bg-slate-950 rounded-xl border border-slate-800 space-y-3 text-xs text-slate-300">
+                  <div className="font-bold text-sky-400">Method 3: Native Private DNS (self-hosted VPS only)</div>
+                  <p>
+                    Only works if the server also runs a DNS-over-TLS listener on port 853 (see DEPLOYMENT_GUIDE.md).
+                    Shared hosting and serverless platforms cannot open port 853.
+                  </p>
                 </div>
               </div>
             )}

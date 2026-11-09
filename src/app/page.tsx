@@ -32,11 +32,19 @@ import {
   HelpCircle,
   FileText,
   BarChart2,
-  ToggleLeft,
-  ToggleRight,
-  Code,
   AlertTriangle,
+  Sun,
+  Moon,
+  Users,
+  Flame,
+  Radio,
+  FileDown,
+  ChevronRight,
+  Filter,
+  Eye,
+  Key,
 } from 'lucide-react';
+import { CuratedListDef } from '@/lib/blocklists';
 
 interface Stats {
   totalQueries: number;
@@ -57,6 +65,37 @@ interface Stats {
   avgLatencyMs: number;
   rewrites: { id: string; domain: string; answer: string }[];
   blockedServiceIds: string[];
+  firewall: {
+    blocksCount: number;
+    config: {
+      threatLevel: 'low' | 'balanced' | 'strict' | 'paranoid';
+      blockRiskyTlds: boolean;
+      blockAiScrapers: boolean;
+      blockCryptoMiners: boolean;
+      blockNewDomains: boolean;
+      rateLimitEnabled: boolean;
+      maxQueriesPerMinute: number;
+    };
+  };
+  curatedLists: CuratedListDef[];
+  devices: {
+    id: string;
+    name: string;
+    token: string;
+    ownerEmail: string;
+    createdAt: number;
+    lastActive: number;
+    totalQueries: number;
+    blockedQueries: number;
+    status: 'active' | 'paused' | 'revoked';
+  }[];
+  users: {
+    id: string;
+    email: string;
+    role: 'admin' | 'user';
+    name: string;
+    createdAt: number;
+  }[];
 }
 
 interface LogEntry {
@@ -97,12 +136,12 @@ interface ServiceDef {
 }
 
 interface CloudStatus {
-  upstashConnected: boolean;
   supabaseConnected: boolean;
   mode: string;
 }
 
-export default function AdGuardHomeUI() {
+export default function AdvGuardApp() {
+  const [theme, setTheme] = useState<'dark' | 'light'>('dark');
   const [stats, setStats] = useState<Stats>({
     totalQueries: 0,
     blockedQueries: 0,
@@ -122,6 +161,21 @@ export default function AdGuardHomeUI() {
     avgLatencyMs: 14,
     rewrites: [],
     blockedServiceIds: [],
+    firewall: {
+      blocksCount: 42,
+      config: {
+        threatLevel: 'balanced',
+        blockRiskyTlds: true,
+        blockAiScrapers: true,
+        blockCryptoMiners: true,
+        blockNewDomains: false,
+        rateLimitEnabled: true,
+        maxQueriesPerMinute: 300,
+      },
+    },
+    curatedLists: [],
+    devices: [],
+    users: [],
   });
 
   const [logs, setLogs] = useState<LogEntry[]>([]);
@@ -129,25 +183,29 @@ export default function AdGuardHomeUI() {
   const [blocklists, setBlocklists] = useState<SubscribedList[]>([]);
   const [services, setServices] = useState<ServiceDef[]>([]);
   const [cloud, setCloud] = useState<CloudStatus>({
-    upstashConnected: false,
     supabaseConnected: false,
-    mode: 'Local In-Memory Fallback',
+    mode: 'Local In-Memory Mode',
   });
 
-  // Top Nav active section
-  const [activeNav, setActiveNav] = useState<'dashboard' | 'settings' | 'filters' | 'logs' | 'guide'>('dashboard');
-  const [filtersSubTab, setFiltersSubTab] = useState<'blocklists' | 'services' | 'custom' | 'rewrites'>('blocklists');
-  const [settingsSubTab, setSettingsSubTab] = useState<'general' | 'dns' | 'cloud'>('general');
+  // Navigation
+  const [activeNav, setActiveNav] = useState<'dashboard' | 'logs' | 'firewall' | 'filters' | 'users' | 'guide' | 'settings'>('dashboard');
+  const [filtersSubTab, setFiltersSubTab] = useState<'curated' | 'services' | 'blocklists' | 'custom' | 'rewrites'>('curated');
+  const [guideSubTab, setGuideSubTab] = useState<'public' | 'ios' | 'android' | 'windows' | 'mac' | 'router' | 'browser'>('public');
 
   const [copied, setCopied] = useState(false);
   const [hostUrl, setHostUrl] = useState('');
   const [autoRefresh, setAutoRefresh] = useState(true);
 
-  // Query log filters
+  // Filters
   const [logStatusFilter, setLogStatusFilter] = useState<'all' | 'blocked' | 'processed'>('all');
   const [searchQuery, setSearchQuery] = useState('');
 
-  // Custom rule input
+  // Device registration modal state
+  const [newDevName, setNewDevName] = useState('');
+  const [newDevToken, setNewDevToken] = useState('');
+  const [showAddDeviceModal, setShowAddDeviceModal] = useState(false);
+
+  // Custom rules text
   const [customRulesText, setCustomRulesText] = useState('');
   const [ruleMessage, setRuleMessage] = useState('');
 
@@ -155,13 +213,12 @@ export default function AdGuardHomeUI() {
   const [rewriteDomain, setRewriteDomain] = useState('');
   const [rewriteIp, setRewriteIp] = useState('');
 
-  // Device Tag state
-  const [deviceTag, setDeviceTag] = useState('phone');
-
-  // Quick live tester
+  // Live Tester
   const [testDomain, setTestDomain] = useState('doubleclick.net');
   const [testResult, setTestResult] = useState<any>(null);
   const [isTesting, setIsTesting] = useState(false);
+
+  const PUBLIC_DOMAIN = 'advgaurd.veerbhanushali.com';
 
   const fetchStats = async () => {
     try {
@@ -176,50 +233,101 @@ export default function AdGuardHomeUI() {
         if (data.cloud) setCloud(data.cloud);
       }
     } catch {
-      // offline or compiling
+      // offline / compiling
     }
   };
 
   useEffect(() => {
     setHostUrl(window.location.origin);
+    const savedTheme = localStorage.getItem('advguard-theme') as 'dark' | 'light' | null;
+    if (savedTheme) setTheme(savedTheme);
+
     fetchStats();
     if (!autoRefresh) return;
     const interval = setInterval(fetchStats, 3000);
     return () => clearInterval(interval);
   }, [autoRefresh]);
 
-  const copyUrl = (text: string) => {
+  const toggleTheme = () => {
+    const next = theme === 'dark' ? 'light' : 'dark';
+    setTheme(next);
+    localStorage.setItem('advguard-theme', next);
+  };
+
+  const copyText = (text: string) => {
     navigator.clipboard.writeText(text);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
 
   const toggleProtection = async () => {
-    const nextState = !stats.protectionEnabled;
     await fetch('/api/stats', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'set-protection', enabled: nextState }),
+      body: JSON.stringify({ action: 'set-protection', enabled: !stats.protectionEnabled }),
     });
     fetchStats();
   };
 
-  const toggleSafeSearch = async () => {
+  const updateFirewall = async (key: string, value: any) => {
+    const updated = { ...stats.firewall.config, [key]: value };
     await fetch('/api/stats', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'set-safesearch', enabled: !stats.safeSearchEnabled }),
+      body: JSON.stringify({ action: 'update-firewall', config: updated }),
     });
     fetchStats();
   };
 
-  const toggleSafeBrowsing = async () => {
+  const registerDevice = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newDevName.trim() || !newDevToken.trim()) return;
     await fetch('/api/stats', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'set-safebrowsing', enabled: !stats.safeBrowsingEnabled }),
+      body: JSON.stringify({ action: 'register-device', name: newDevName, token: newDevToken }),
+    });
+    setNewDevName('');
+    setNewDevToken('');
+    setShowAddDeviceModal(false);
+    fetchStats();
+  };
+
+  const deleteDevice = async (id: string) => {
+    await fetch('/api/stats', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'delete-device', id }),
     });
     fetchStats();
+  };
+
+  const clearLogs = async () => {
+    await fetch('/api/stats', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'clear-logs' }),
+    });
+    fetchStats();
+  };
+
+  const exportLogsToCsv = () => {
+    const headers = 'Time,Type,Domain,Status,Client,Latency(ms),Upstream\n';
+    const rows = logs
+      .map(
+        (l) =>
+          `"${new Date(l.timestamp).toISOString()}","${l.type}","${l.domain}","${
+            l.blocked ? 'BLOCKED' : 'RESOLVED'
+          }","${l.clientIp}","${l.elapsedMs}","${l.upstream || ''}"`
+      )
+      .join('\n');
+
+    const blob = new Blob([headers + rows], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `advguard-logs-${Date.now()}.csv`;
+    a.click();
   };
 
   const toggleBlockedService = async (serviceId: string, current: boolean) => {
@@ -240,7 +348,7 @@ export default function AdGuardHomeUI() {
     fetchStats();
   };
 
-  const addCustomRuleFromEditor = async () => {
+  const addCustomRule = async () => {
     const lines = customRulesText.split('\n');
     let count = 0;
     for (const line of lines) {
@@ -254,7 +362,7 @@ export default function AdGuardHomeUI() {
       }
     }
     setCustomRulesText('');
-    setRuleMessage(`Saved ${count} rule(s) to AdGuard engine!`);
+    setRuleMessage(`Applied ${count} custom rule(s)!`);
     setTimeout(() => setRuleMessage(''), 3000);
     fetchStats();
   };
@@ -315,7 +423,6 @@ export default function AdGuardHomeUI() {
     }
   };
 
-  // Filter query log
   const filteredLogs = logs.filter((log) => {
     if (logStatusFilter === 'blocked' && !log.blocked) return false;
     if (logStatusFilter === 'processed' && log.blocked) return false;
@@ -323,255 +430,271 @@ export default function AdGuardHomeUI() {
     return true;
   });
 
+  const isDark = theme === 'dark';
+
   return (
-    <div className="min-h-screen bg-[#111827] text-slate-100 flex flex-col font-sans selection:bg-[#2db365] selection:text-white">
-      {/* Official AdGuard Home Header */}
-      <header className="bg-[#1f2937] border-b border-slate-700/80 sticky top-0 z-50 shadow-md">
+    <div
+      className={`min-h-screen flex flex-col font-sans transition-colors duration-200 ${
+        isDark ? 'bg-[#090D16] text-slate-100' : 'bg-slate-50 text-slate-900'
+      }`}
+    >
+      {/* Top Header Navbar */}
+      <header
+        className={`border-b sticky top-0 z-50 backdrop-blur-md transition-colors ${
+          isDark ? 'bg-[#0E1524]/90 border-slate-800' : 'bg-white/95 border-slate-200 shadow-sm'
+        }`}
+      >
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex items-center justify-between h-14">
-            {/* Logo: Authentic AdGuard Home */}
-            <div className="flex items-center gap-6">
+          <div className="flex items-center justify-between h-16">
+            {/* Logo */}
+            <div className="flex items-center gap-8">
               <div
                 onClick={() => setActiveNav('dashboard')}
-                className="flex items-center gap-2.5 cursor-pointer group select-none"
+                className="flex items-center gap-3 cursor-pointer group select-none"
               >
-                <div className="w-8 h-8 rounded-lg bg-[#2db365] flex items-center justify-center text-white shadow-sm shadow-[#2db365]/30">
+                <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-emerald-600 to-emerald-400 flex items-center justify-center text-white shadow-md shadow-emerald-500/20">
                   <Shield className="w-5 h-5 fill-white/20 stroke-[2.5]" />
                 </div>
-                <div className="flex items-baseline gap-1">
-                  <span className="font-extrabold text-lg tracking-tight text-white">AdvGuard</span>
-                  <span className="text-lg font-light text-[#2db365]">Home</span>
-                  <span className="ml-1 text-[10px] font-mono font-medium px-1.5 py-0.2 bg-[#2db365]/20 text-[#2db365] rounded border border-[#2db365]/30">
-                    Web Edition
+                <div className="flex items-baseline gap-1.5">
+                  <span className="font-extrabold text-xl tracking-tight text-white dark:text-white">
+                    Adv<span className="text-emerald-500">Guard</span>
+                  </span>
+                  <span className="text-xs font-mono font-semibold px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-500 border border-emerald-500/20">
+                    Pro Engine
                   </span>
                 </div>
               </div>
 
-              {/* Navigation Menu */}
-              <nav className="hidden md:flex items-center space-x-1 text-sm font-medium">
-                <button
-                  onClick={() => setActiveNav('dashboard')}
-                  className={`px-3.5 py-1.5 rounded-md transition ${
-                    activeNav === 'dashboard'
-                      ? 'bg-slate-800 text-white font-semibold'
-                      : 'text-slate-300 hover:text-white hover:bg-slate-800/60'
-                  }`}
-                >
-                  Dashboard
-                </button>
-
-                <button
-                  onClick={() => setActiveNav('settings')}
-                  className={`px-3.5 py-1.5 rounded-md transition ${
-                    activeNav === 'settings'
-                      ? 'bg-slate-800 text-white font-semibold'
-                      : 'text-slate-300 hover:text-white hover:bg-slate-800/60'
-                  }`}
-                >
-                  Settings
-                </button>
-
-                <button
-                  onClick={() => setActiveNav('filters')}
-                  className={`px-3.5 py-1.5 rounded-md transition ${
-                    activeNav === 'filters'
-                      ? 'bg-slate-800 text-white font-semibold'
-                      : 'text-slate-300 hover:text-white hover:bg-slate-800/60'
-                  }`}
-                >
-                  Filters
-                </button>
-
-                <button
-                  onClick={() => setActiveNav('logs')}
-                  className={`px-3.5 py-1.5 rounded-md transition ${
-                    activeNav === 'logs'
-                      ? 'bg-slate-800 text-white font-semibold'
-                      : 'text-slate-300 hover:text-white hover:bg-slate-800/60'
-                  }`}
-                >
-                  Query Log
-                </button>
-
-                <button
-                  onClick={() => setActiveNav('guide')}
-                  className={`px-3.5 py-1.5 rounded-md transition ${
-                    activeNav === 'guide'
-                      ? 'bg-slate-800 text-white font-semibold'
-                      : 'text-slate-300 hover:text-white hover:bg-slate-800/60'
-                  }`}
-                >
-                  Setup Guide
-                </button>
+              {/* Navigation Links */}
+              <nav className="hidden lg:flex items-center space-x-1 text-sm font-medium">
+                {[
+                  { id: 'dashboard', label: 'Dashboard', icon: Activity },
+                  { id: 'logs', label: 'Query Log', icon: ShieldAlert },
+                  { id: 'firewall', label: 'Smart Firewall', icon: Flame },
+                  { id: 'filters', label: 'Blocklists & Rules', icon: Layers },
+                  { id: 'users', label: 'Devices & Users', icon: Users },
+                  { id: 'guide', label: 'Setup Guide', icon: Smartphone },
+                  { id: 'settings', label: 'Settings', icon: Sliders },
+                ].map((item) => {
+                  const Icon = item.icon;
+                  const active = activeNav === item.id;
+                  return (
+                    <button
+                      key={item.id}
+                      onClick={() => setActiveNav(item.id as any)}
+                      className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg transition text-xs font-semibold ${
+                        active
+                          ? isDark
+                            ? 'bg-slate-800 text-emerald-400 border border-slate-700'
+                            : 'bg-slate-100 text-emerald-600 border border-slate-200'
+                          : isDark
+                          ? 'text-slate-400 hover:text-white hover:bg-slate-800/50'
+                          : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+                      }`}
+                    >
+                      <Icon className="w-3.5 h-3.5" />
+                      {item.label}
+                    </button>
+                  );
+                })}
               </nav>
             </div>
 
-            {/* Top Right: Protection Switch & Author attribution */}
+            {/* Right Header Actions */}
             <div className="flex items-center gap-3">
-              {/* Protection Toggle */}
+              {/* Protection Switch */}
               <button
                 onClick={toggleProtection}
-                className={`flex items-center gap-2 px-3 py-1 rounded-full text-xs font-semibold border transition ${
+                className={`flex items-center gap-2 px-3.5 py-1.5 rounded-full text-xs font-bold transition border ${
                   stats.protectionEnabled
-                    ? 'bg-[#2db365]/10 text-[#2db365] border-[#2db365]/30 hover:bg-[#2db365]/20'
-                    : 'bg-rose-500/10 text-rose-400 border-rose-500/30 hover:bg-rose-500/20'
+                    ? 'bg-emerald-500/10 text-emerald-500 border-emerald-500/30 hover:bg-emerald-500/20'
+                    : 'bg-rose-500/10 text-rose-500 border-rose-500/30 hover:bg-rose-500/20'
                 }`}
               >
                 <span
                   className={`w-2 h-2 rounded-full ${
-                    stats.protectionEnabled ? 'bg-[#2db365] animate-pulse' : 'bg-rose-500'
+                    stats.protectionEnabled ? 'bg-emerald-500 animate-pulse' : 'bg-rose-500'
                   }`}
                 />
-                Protection: {stats.protectionEnabled ? 'ON' : 'OFF'}
+                Protection: {stats.protectionEnabled ? 'ON' : 'PAUSED'}
               </button>
 
-              {/* Author Badge */}
-              <div className="hidden sm:flex items-center gap-1.5 text-xs text-slate-400 bg-slate-800/80 px-2.5 py-1 rounded-lg border border-slate-700">
-                <span>By</span>
-                <strong className="text-[#2db365]">Veer Bhanushali</strong>
+              {/* Theme Toggle Button */}
+              <button
+                onClick={toggleTheme}
+                title={isDark ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+                className={`p-2 rounded-xl border transition ${
+                  isDark
+                    ? 'bg-slate-800/80 text-amber-400 border-slate-700 hover:bg-slate-700'
+                    : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-100 shadow-sm'
+                }`}
+              >
+                {isDark ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+              </button>
+
+              {/* Creator Pill */}
+              <div
+                className={`hidden md:flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-xl border ${
+                  isDark ? 'bg-slate-800/60 border-slate-700 text-slate-300' : 'bg-slate-100 border-slate-200 text-slate-700'
+                }`}
+              >
+                <span className="text-slate-400">By</span>
+                <strong className="text-emerald-500">Veer Bhanushali</strong>
               </div>
             </div>
           </div>
         </div>
 
-        {/* Sub-navigation bar for Filters and Settings */}
+        {/* Filters Sub-navigation */}
         {activeNav === 'filters' && (
-          <div className="bg-[#182230] border-t border-slate-700/60 px-4 sm:px-8 py-2 flex items-center space-x-4 text-xs font-medium">
-            <button
-              onClick={() => setFiltersSubTab('blocklists')}
-              className={`px-2.5 py-1 rounded transition ${
-                filtersSubTab === 'blocklists' ? 'bg-[#2db365] text-white font-bold' : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              DNS blocklists ({blocklists.length})
-            </button>
-            <button
-              onClick={() => setFiltersSubTab('services')}
-              className={`px-2.5 py-1 rounded transition ${
-                filtersSubTab === 'services' ? 'bg-[#2db365] text-white font-bold' : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              Blocked services ({services.length})
-            </button>
-            <button
-              onClick={() => setFiltersSubTab('custom')}
-              className={`px-2.5 py-1 rounded transition ${
-                filtersSubTab === 'custom' ? 'bg-[#2db365] text-white font-bold' : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              Custom filtering rules ({rules.length})
-            </button>
-            <button
-              onClick={() => setFiltersSubTab('rewrites')}
-              className={`px-2.5 py-1 rounded transition ${
-                filtersSubTab === 'rewrites' ? 'bg-[#2db365] text-white font-bold' : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              DNS rewrites ({stats.rewrites.length})
-            </button>
+          <div
+            className={`border-t px-4 sm:px-8 py-2 flex items-center space-x-3 text-xs font-semibold ${
+              isDark ? 'bg-[#0b101c] border-slate-800' : 'bg-slate-100 border-slate-200'
+            }`}
+          >
+            {[
+              { id: 'curated', label: 'Curated AdvGuard Lists' },
+              { id: 'services', label: 'Blocked Services' },
+              { id: 'blocklists', label: 'Subscribed Lists' },
+              { id: 'custom', label: 'Custom User Rules' },
+              { id: 'rewrites', label: 'DNS Rewrites' },
+            ].map((sub) => (
+              <button
+                key={sub.id}
+                onClick={() => setFiltersSubTab(sub.id as any)}
+                className={`px-3 py-1 rounded-md transition ${
+                  filtersSubTab === sub.id
+                    ? 'bg-emerald-600 text-white'
+                    : isDark
+                    ? 'text-slate-400 hover:text-white'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                {sub.label}
+              </button>
+            ))}
           </div>
         )}
 
-        {activeNav === 'settings' && (
-          <div className="bg-[#182230] border-t border-slate-700/60 px-4 sm:px-8 py-2 flex items-center space-x-4 text-xs font-medium">
-            <button
-              onClick={() => setSettingsSubTab('general')}
-              className={`px-2.5 py-1 rounded transition ${
-                settingsSubTab === 'general' ? 'bg-[#2db365] text-white font-bold' : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              General settings
-            </button>
-            <button
-              onClick={() => setSettingsSubTab('dns')}
-              className={`px-2.5 py-1 rounded transition ${
-                settingsSubTab === 'dns' ? 'bg-[#2db365] text-white font-bold' : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              DNS settings
-            </button>
-            <button
-              onClick={() => setSettingsSubTab('cloud')}
-              className={`px-2.5 py-1 rounded transition ${
-                settingsSubTab === 'cloud' ? 'bg-[#2db365] text-white font-bold' : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              Upstash & Supabase Cloud
-            </button>
+        {/* Setup Guide Sub-navigation */}
+        {activeNav === 'guide' && (
+          <div
+            className={`border-t px-4 sm:px-8 py-2 flex items-center space-x-3 text-xs font-semibold overflow-x-auto ${
+              isDark ? 'bg-[#0b101c] border-slate-800' : 'bg-slate-100 border-slate-200'
+            }`}
+          >
+            {[
+              { id: 'public', label: 'Free Public DNS' },
+              { id: 'ios', label: 'iOS & iPadOS' },
+              { id: 'android', label: 'Android' },
+              { id: 'windows', label: 'Windows 11 / 10' },
+              { id: 'mac', label: 'macOS' },
+              { id: 'router', label: 'Routers' },
+              { id: 'browser', label: 'Chrome / Edge / Firefox' },
+            ].map((g) => (
+              <button
+                key={g.id}
+                onClick={() => setGuideSubTab(g.id as any)}
+                className={`px-3 py-1 rounded-md transition whitespace-nowrap ${
+                  guideSubTab === g.id
+                    ? 'bg-emerald-600 text-white'
+                    : isDark
+                    ? 'text-slate-400 hover:text-white'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                {g.label}
+              </button>
+            ))}
           </div>
         )}
       </header>
 
-      {/* Main App Container */}
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 flex-1 w-full space-y-6">
-        {/* VIEW 1: DASHBOARD (Authentic AdGuard Home 4-Card + 2x2 Table Layout) */}
-        {activeNav === 'dashboard' && (
-          <div className="space-y-6">
-            {/* Top Protection Banner */}
-            <div className="bg-[#1f2937] border border-slate-700/80 rounded-xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-sm">
-              <div className="flex items-center gap-3">
-                <div
-                  className={`w-3 h-3 rounded-full ${
-                    stats.protectionEnabled ? 'bg-[#2db365]' : 'bg-rose-500'
-                  }`}
-                />
-                <div>
-                  <h3 className="text-sm font-bold text-white">
-                    {stats.protectionEnabled
-                      ? 'Protection is enabled'
-                      : 'Protection is disabled — Ads and tracking are NOT blocked'}
-                  </h3>
-                  <p className="text-xs text-slate-400">
-                    Running in DoH web mode over HTTPS. Upstream queries are encrypted.
-                  </p>
-                </div>
+      {/* Main Container */}
+      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 flex-1 w-full space-y-8">
+        {/* PUBLIC ACCESS HERO BANNER (advgaurd.veerbhanushali.com) */}
+        <div
+          className={`rounded-2xl p-6 border relative overflow-hidden transition ${
+            isDark
+              ? 'bg-gradient-to-r from-emerald-950/40 via-slate-900 to-slate-900 border-emerald-500/30'
+              : 'bg-gradient-to-r from-emerald-50 via-white to-white border-emerald-200 shadow-sm'
+          }`}
+        >
+          <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-6 relative z-10">
+            <div className="space-y-2">
+              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-500 text-xs font-bold">
+                <Radio className="w-3.5 h-3.5 animate-pulse" /> FREE GLOBAL PUBLIC DNS SERVICE
               </div>
-
-              <div className="flex items-center gap-2 text-xs">
-                <button
-                  onClick={fetchStats}
-                  className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg flex items-center gap-1.5 transition"
-                >
-                  <RefreshCw className="w-3.5 h-3.5" /> Refresh
-                </button>
-                <button
-                  onClick={toggleProtection}
-                  className={`px-3 py-1.5 rounded-lg font-semibold transition ${
-                    stats.protectionEnabled
-                      ? 'bg-rose-600/20 text-rose-300 hover:bg-rose-600/30'
-                      : 'bg-[#2db365] text-white hover:bg-[#259b56]'
-                  }`}
-                >
-                  {stats.protectionEnabled ? 'Disable protection' : 'Enable protection'}
-                </button>
-              </div>
+              <h2 className={`text-xl sm:text-2xl font-black tracking-tight ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                Zero Setup? Connect to <span className="text-emerald-500">advgaurd.veerbhanushali.com</span>
+              </h2>
+              <p className={`text-xs sm:text-sm max-w-2xl ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+                You don’t even need to host your own server. Paste our public DNS endpoint into your phone’s Private DNS or
+                mobile VPN app, and all ads and trackers will be blocked automatically anywhere in the world!
+              </p>
             </div>
 
-            {/* Official 4-Card Metric Grid */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-              {/* Card 1: DNS Queries */}
-              <div className="bg-[#1f2937] border border-slate-700/80 rounded-xl p-5 shadow-sm space-y-2">
-                <div className="flex items-center justify-between text-slate-400">
-                  <span className="text-xs font-semibold text-slate-300">DNS queries</span>
-                  <BarChart2 className="w-4 h-4 text-sky-400" />
+            {/* Quick Copy Box */}
+            <div
+              className={`p-3 rounded-xl border flex items-center gap-3 w-full lg:w-auto font-mono text-xs ${
+                isDark ? 'bg-slate-950 border-slate-800' : 'bg-slate-100 border-slate-300'
+              }`}
+            >
+              <div className="space-y-0.5">
+                <div className="text-[10px] text-slate-500 uppercase font-sans font-bold">Public DoH URL</div>
+                <div className="text-emerald-500 font-bold select-all truncate max-w-xs sm:max-w-sm">
+                  https://advgaurd.veerbhanushali.com/dns-query
                 </div>
-                <div className="text-3xl font-extrabold text-white font-mono">{stats.totalQueries.toLocaleString()}</div>
-                <div className="text-[11px] text-slate-400">Total queries in 24 hours</div>
-                {/* Visual bar */}
-                <div className="w-full bg-slate-800 h-1.5 rounded-full mt-2 overflow-hidden">
-                  <div className="bg-sky-500 h-full w-full rounded-full" />
+              </div>
+              <button
+                onClick={() => copyText('https://advgaurd.veerbhanushali.com/dns-query')}
+                className="px-3 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-sans font-bold text-xs flex items-center gap-1.5 transition shrink-0"
+              >
+                {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                {copied ? 'Copied' : 'Copy'}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* VIEW 1: DASHBOARD */}
+        {activeNav === 'dashboard' && (
+          <div className="space-y-8">
+            {/* 4 Big KPI Metric Cards */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              {/* Queries */}
+              <div
+                className={`p-5 rounded-2xl border transition shadow-sm ${
+                  isDark ? 'bg-[#101726] border-slate-800' : 'bg-white border-slate-200'
+                }`}
+              >
+                <div className="flex items-center justify-between text-slate-400 mb-2">
+                  <span className="text-xs font-bold uppercase tracking-wider">DNS Queries</span>
+                  <Activity className="w-4 h-4 text-sky-500" />
+                </div>
+                <div className={`text-3xl font-black font-mono ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                  {stats.totalQueries.toLocaleString()}
+                </div>
+                <div className="text-xs text-slate-500 mt-2 flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-emerald-500" /> Upstream DoH active
                 </div>
               </div>
 
-              {/* Card 2: Blocked by Filters */}
-              <div className="bg-[#1f2937] border border-slate-700/80 rounded-xl p-5 shadow-sm space-y-2">
-                <div className="flex items-center justify-between text-slate-400">
-                  <span className="text-xs font-semibold text-slate-300">Blocked by filters</span>
-                  <ShieldAlert className="w-4 h-4 text-rose-400" />
+              {/* Blocked by Filters */}
+              <div
+                className={`p-5 rounded-2xl border transition shadow-sm ${
+                  isDark ? 'bg-[#101726] border-slate-800' : 'bg-white border-slate-200'
+                }`}
+              >
+                <div className="flex items-center justify-between text-slate-400 mb-2">
+                  <span className="text-xs font-bold uppercase tracking-wider">Blocked by Filters</span>
+                  <ShieldAlert className="w-4 h-4 text-rose-500" />
                 </div>
-                <div className="text-3xl font-extrabold text-rose-400 font-mono">{stats.blockedQueries.toLocaleString()}</div>
-                <div className="text-[11px] text-slate-400">{stats.blockedPercentage}% of all queries blocked</div>
-                <div className="w-full bg-slate-800 h-1.5 rounded-full mt-2 overflow-hidden">
+                <div className="text-3xl font-black font-mono text-rose-500">
+                  {stats.blockedQueries.toLocaleString()}
+                </div>
+                <div className="text-xs text-slate-500 mt-2">{stats.blockedPercentage}% of all traffic filtered</div>
+                <div className="w-full bg-slate-200 dark:bg-slate-800 h-1.5 rounded-full mt-2.5 overflow-hidden">
                   <div
                     className="bg-rose-500 h-full rounded-full transition-all duration-500"
                     style={{ width: `${Math.min(stats.blockedPercentage, 100)}%` }}
@@ -579,179 +702,203 @@ export default function AdGuardHomeUI() {
                 </div>
               </div>
 
-              {/* Card 3: Blocked malware/phishing */}
-              <div className="bg-[#1f2937] border border-slate-700/80 rounded-xl p-5 shadow-sm space-y-2">
-                <div className="flex items-center justify-between text-slate-400">
-                  <span className="text-xs font-semibold text-slate-300">Blocked malware/phishing</span>
-                  <AlertTriangle className="w-4 h-4 text-amber-400" />
+              {/* Firewall Blocks */}
+              <div
+                className={`p-5 rounded-2xl border transition shadow-sm ${
+                  isDark ? 'bg-[#101726] border-slate-800' : 'bg-white border-slate-200'
+                }`}
+              >
+                <div className="flex items-center justify-between text-slate-400 mb-2">
+                  <span className="text-xs font-bold uppercase tracking-wider">Firewall Blocks</span>
+                  <Flame className="w-4 h-4 text-amber-500" />
                 </div>
-                <div className="text-3xl font-extrabold text-amber-400 font-mono">{stats.malwareBlockedCount}</div>
-                <div className="text-[11px] text-slate-400">Safe Browsing active</div>
-                <div className="w-full bg-slate-800 h-1.5 rounded-full mt-2 overflow-hidden">
-                  <div className="bg-amber-500 h-full w-1/4 rounded-full" />
+                <div className="text-3xl font-black font-mono text-amber-500">
+                  {stats.firewall.blocksCount.toLocaleString()}
+                </div>
+                <div className="text-xs text-slate-500 mt-2">Spam TLDs, AI Scrapers, Miners</div>
+                <div className="w-full bg-slate-200 dark:bg-slate-800 h-1.5 rounded-full mt-2.5 overflow-hidden">
+                  <div className="bg-amber-500 h-full w-2/5 rounded-full" />
                 </div>
               </div>
 
-              {/* Card 4: Blocked adult websites */}
-              <div className="bg-[#1f2937] border border-slate-700/80 rounded-xl p-5 shadow-sm space-y-2">
-                <div className="flex items-center justify-between text-slate-400">
-                  <span className="text-xs font-semibold text-slate-300">Blocked adult websites</span>
-                  <Lock className="w-4 h-4 text-purple-400" />
+              {/* Active Security Rules */}
+              <div
+                className={`p-5 rounded-2xl border transition shadow-sm ${
+                  isDark ? 'bg-[#101726] border-slate-800' : 'bg-white border-slate-200'
+                }`}
+              >
+                <div className="flex items-center justify-between text-slate-400 mb-2">
+                  <span className="text-xs font-bold uppercase tracking-wider">Active Rules</span>
+                  <Layers className="w-4 h-4 text-purple-500" />
                 </div>
-                <div className="text-3xl font-extrabold text-purple-400 font-mono">{stats.adultBlockedCount}</div>
-                <div className="text-[11px] text-slate-400">Parental control active</div>
-                <div className="w-full bg-slate-800 h-1.5 rounded-full mt-2 overflow-hidden">
-                  <div className="bg-purple-500 h-full w-1/6 rounded-full" />
+                <div className={`text-3xl font-black font-mono ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                  {stats.rulesCount.toLocaleString()}
                 </div>
+                <div className="text-xs text-slate-500 mt-2">AdvGuard Ultra + Custom Filters</div>
               </div>
             </div>
 
-            {/* Official 24-Hour Activity Chart */}
-            <div className="bg-[#1f2937] border border-slate-700/80 rounded-xl p-5 shadow-sm space-y-4">
+            {/* Live DNS Domain Tester */}
+            <div
+              className={`p-5 rounded-2xl border transition ${
+                isDark ? 'bg-[#101726] border-slate-800' : 'bg-white border-slate-200 shadow-sm'
+              }`}
+            >
+              <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                <div>
+                  <h3 className={`text-sm font-bold flex items-center gap-2 ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                    <Search className="w-4 h-4 text-emerald-500" /> Real-Time Domain Lookup & AdBlock Tester
+                  </h3>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Query your AdvGuard DoH resolver live to verify if any domain is blocked or allowed.
+                  </p>
+                </div>
+
+                <form onSubmit={runTester} className="flex items-center gap-2 w-full sm:w-auto">
+                  <input
+                    type="text"
+                    value={testDomain}
+                    onChange={(e) => setTestDomain(e.target.value)}
+                    placeholder="e.g. doubleclick.net, google.com"
+                    className={`px-3 py-2 rounded-xl text-xs font-mono border focus:outline-none focus:border-emerald-500 w-full sm:w-64 ${
+                      isDark ? 'bg-slate-950 border-slate-800 text-white' : 'bg-slate-50 border-slate-300 text-slate-900'
+                    }`}
+                  />
+                  <button
+                    type="submit"
+                    disabled={isTesting}
+                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold transition shrink-0"
+                  >
+                    {isTesting ? 'Testing...' : 'Test DoH'}
+                  </button>
+                </form>
+              </div>
+
+              {testResult && (
+                <div
+                  className={`mt-4 p-3 rounded-xl border text-xs font-mono flex items-center justify-between ${
+                    isDark ? 'bg-slate-950 border-slate-800' : 'bg-slate-50 border-slate-200'
+                  }`}
+                >
+                  <span>
+                    Domain: <strong className={isDark ? 'text-white' : 'text-slate-900'}>{testDomain}</strong>
+                  </span>
+                  {testResult.Blocked ? (
+                    <span className="px-2.5 py-1 rounded-full bg-rose-500/20 text-rose-500 font-bold border border-rose-500/30">
+                      BLOCKED BY ADVGUARD (0.0.0.0)
+                    </span>
+                  ) : (
+                    <span className="px-2.5 py-1 rounded-full bg-emerald-500/20 text-emerald-500 font-bold border border-emerald-500/30">
+                      RESOLVED VIA ENCRYPTED UPSTREAM
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* 24-Hour Activity Chart */}
+            <div
+              className={`p-6 rounded-2xl border transition shadow-sm space-y-4 ${
+                isDark ? 'bg-[#101726] border-slate-800' : 'bg-white border-slate-200'
+              }`}
+            >
               <div className="flex items-center justify-between">
                 <div>
-                  <h3 className="text-sm font-bold text-white">DNS Queries Over Time (24h Activity)</h3>
-                  <p className="text-xs text-slate-400">Real-time query distribution across hourly buckets</p>
+                  <h3 className={`text-base font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                    DNS Queries Over Time (24h Activity)
+                  </h3>
+                  <p className="text-xs text-slate-500">Hourly query volume: Clean requests vs. blocked ads</p>
                 </div>
-                <div className="flex items-center gap-4 text-xs">
+                <div className="flex items-center gap-4 text-xs font-semibold">
                   <div className="flex items-center gap-1.5">
-                    <span className="w-2.5 h-2.5 bg-[#2db365] rounded-sm" /> Clean Queries
+                    <span className="w-2.5 h-2.5 bg-emerald-500 rounded-sm" /> Clean Queries
                   </div>
                   <div className="flex items-center gap-1.5">
-                    <span className="w-2.5 h-2.5 bg-rose-500 rounded-sm" /> Blocked Requests
+                    <span className="w-2.5 h-2.5 bg-rose-500 rounded-sm" /> Blocked Traffic
                   </div>
                 </div>
               </div>
 
-              {/* Visual Bar Graph */}
-              <div className="h-32 flex items-end justify-between gap-2 pt-4 px-2 border-b border-slate-700">
+              <div className="h-36 flex items-end justify-between gap-3 pt-6 border-b border-slate-200 dark:border-slate-800 px-2">
                 {stats.chartData.map((item, idx) => {
                   const maxVal = 300;
                   const queryH = Math.min((item.queries / maxVal) * 100, 100);
                   const blockedH = Math.min((item.blocked / maxVal) * 100, 100);
 
                   return (
-                    <div key={idx} className="flex-1 flex flex-col items-center gap-1 h-full justify-end group">
+                    <div key={idx} className="flex-1 flex flex-col items-center gap-1.5 h-full justify-end group">
                       <div className="w-full flex items-end justify-center gap-1 h-full">
-                        {/* Clean queries bar */}
                         <div
-                          className="w-1/2 bg-[#2db365] rounded-t transition-all group-hover:bg-[#34c772]"
+                          className="w-1/2 bg-emerald-500 rounded-t transition-all group-hover:bg-emerald-400"
                           style={{ height: `${queryH}%` }}
-                          title={`Queries: ${item.queries}`}
                         />
-                        {/* Blocked queries bar */}
                         <div
                           className="w-1/2 bg-rose-500 rounded-t transition-all group-hover:bg-rose-400"
                           style={{ height: `${blockedH}%` }}
-                          title={`Blocked: ${item.blocked}`}
                         />
                       </div>
-                      <span className="text-[10px] text-slate-500 font-mono mt-1">{item.time}</span>
+                      <span className="text-[10px] text-slate-400 font-mono mt-1">{item.time}</span>
                     </div>
                   );
                 })}
               </div>
             </div>
 
-            {/* Official AdGuard Home 2x2 Tables Grid */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {/* Box 1: Top Clients */}
-              <div className="bg-[#1f2937] border border-slate-700/80 rounded-xl p-5 shadow-sm space-y-3">
-                <div className="flex items-center justify-between pb-2 border-b border-slate-700">
-                  <h4 className="text-sm font-bold text-white flex items-center gap-2">
-                    <Laptop className="w-4 h-4 text-sky-400" /> Top Clients
+            {/* 2x2 Tables Grid */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              {/* Top Queried Domains */}
+              <div
+                className={`p-5 rounded-2xl border space-y-4 shadow-sm ${
+                  isDark ? 'bg-[#101726] border-slate-800' : 'bg-white border-slate-200'
+                }`}
+              >
+                <div className="flex items-center justify-between pb-3 border-b border-slate-200 dark:border-slate-800">
+                  <h4 className={`text-sm font-bold flex items-center gap-2 ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                    <Globe className="w-4 h-4 text-emerald-500" /> Top Queried Domains
                   </h4>
-                  <span className="text-xs text-slate-400">Total requests</span>
+                  <span className="text-xs text-slate-500 font-mono">Requests</span>
                 </div>
-                <div className="space-y-2.5 text-xs">
-                  {stats.topClients.map((client, idx) => (
-                    <div key={idx} className="space-y-1">
-                      <div className="flex items-center justify-between">
-                        <span className="font-mono text-slate-200">{client.client}</span>
-                        <span className="font-mono text-slate-400">{client.count.toLocaleString()}</span>
-                      </div>
-                      <div className="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden">
-                        <div
-                          className="bg-sky-500 h-full rounded-full"
-                          style={{ width: `${Math.min((client.count / (stats.topClients[0]?.count || 1)) * 100, 100)}%` }}
-                        />
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              {/* Box 2: Top Queried Domains */}
-              <div className="bg-[#1f2937] border border-slate-700/80 rounded-xl p-5 shadow-sm space-y-3">
-                <div className="flex items-center justify-between pb-2 border-b border-slate-700">
-                  <h4 className="text-sm font-bold text-white flex items-center gap-2">
-                    <Globe className="w-4 h-4 text-[#2db365]" /> Top Queried Domains
-                  </h4>
-                  <span className="text-xs text-slate-400">Requests</span>
-                </div>
-                <div className="space-y-2.5 text-xs">
-                  {stats.topDomains.map((domain, idx) => (
-                    <div key={idx} className="space-y-1">
-                      <div className="flex items-center justify-between">
-                        <span className="font-mono text-slate-200">{domain.domain}</span>
-                        <span className="font-mono text-slate-400">{domain.count.toLocaleString()}</span>
-                      </div>
-                      <div className="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden">
-                        <div
-                          className="bg-[#2db365] h-full rounded-full"
-                          style={{ width: `${Math.min((domain.count / (stats.topDomains[0]?.count || 1)) * 100, 100)}%` }}
-                        />
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              {/* Box 3: Top Blocked Domains */}
-              <div className="bg-[#1f2937] border border-slate-700/80 rounded-xl p-5 shadow-sm space-y-3">
-                <div className="flex items-center justify-between pb-2 border-b border-slate-700">
-                  <h4 className="text-sm font-bold text-white flex items-center gap-2">
-                    <ShieldAlert className="w-4 h-4 text-rose-400" /> Top Blocked Domains
-                  </h4>
-                  <span className="text-xs text-slate-400">Blocks</span>
-                </div>
-                <div className="space-y-2.5 text-xs">
-                  {stats.topBlockedDomains.map((domain, idx) => (
-                    <div key={idx} className="space-y-1">
-                      <div className="flex items-center justify-between">
-                        <span className="font-mono text-rose-300">{domain.domain}</span>
-                        <span className="font-mono text-rose-400">{domain.count.toLocaleString()}</span>
-                      </div>
-                      <div className="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden">
-                        <div
-                          className="bg-rose-500 h-full rounded-full"
-                          style={{ width: `${Math.min((domain.count / (stats.topBlockedDomains[0]?.count || 1)) * 100, 100)}%` }}
-                        />
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              {/* Box 4: Top Upstream Servers */}
-              <div className="bg-[#1f2937] border border-slate-700/80 rounded-xl p-5 shadow-sm space-y-3">
-                <div className="flex items-center justify-between pb-2 border-b border-slate-700">
-                  <h4 className="text-sm font-bold text-white flex items-center gap-2">
-                    <Zap className="w-4 h-4 text-amber-400" /> Top Upstream Servers
-                  </h4>
-                  <span className="text-xs text-slate-400">Avg. response time</span>
-                </div>
-                <div className="space-y-2.5 text-xs">
-                  {stats.topUpstreams.map((upstream, idx) => (
+                <div className="space-y-3 text-xs">
+                  {stats.topDomains.map((d, idx) => (
                     <div key={idx} className="space-y-1">
                       <div className="flex items-center justify-between font-mono">
-                        <span className="text-slate-200">{upstream.upstream}</span>
-                        <span className="text-amber-400 font-bold">{upstream.avgMs} ms</span>
+                        <span className={isDark ? 'text-slate-200' : 'text-slate-700'}>{d.domain}</span>
+                        <span className="text-slate-400">{d.count.toLocaleString()}</span>
                       </div>
-                      <div className="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden">
+                      <div className="w-full bg-slate-200 dark:bg-slate-800 h-1.5 rounded-full overflow-hidden">
                         <div
-                          className="bg-amber-500 h-full rounded-full"
-                          style={{ width: `${Math.min((upstream.count / (stats.topUpstreams[0]?.count || 1)) * 100, 100)}%` }}
+                          className="bg-emerald-500 h-full rounded-full"
+                          style={{ width: `${Math.min((d.count / (stats.topDomains[0]?.count || 1)) * 100, 100)}%` }}
+                        />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Top Blocked Domains */}
+              <div
+                className={`p-5 rounded-2xl border space-y-4 shadow-sm ${
+                  isDark ? 'bg-[#101726] border-slate-800' : 'bg-white border-slate-200'
+                }`}
+              >
+                <div className="flex items-center justify-between pb-3 border-b border-slate-200 dark:border-slate-800">
+                  <h4 className={`text-sm font-bold flex items-center gap-2 ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                    <ShieldAlert className="w-4 h-4 text-rose-500" /> Top Blocked Trackers
+                  </h4>
+                  <span className="text-xs text-slate-500 font-mono">Blocked</span>
+                </div>
+                <div className="space-y-3 text-xs">
+                  {stats.topBlockedDomains.map((d, idx) => (
+                    <div key={idx} className="space-y-1">
+                      <div className="flex items-center justify-between font-mono">
+                        <span className="text-rose-400">{d.domain}</span>
+                        <span className="text-rose-500 font-bold">{d.count.toLocaleString()}</span>
+                      </div>
+                      <div className="w-full bg-slate-200 dark:bg-slate-800 h-1.5 rounded-full overflow-hidden">
+                        <div
+                          className="bg-rose-500 h-full rounded-full"
+                          style={{ width: `${Math.min((d.count / (stats.topBlockedDomains[0]?.count || 1)) * 100, 100)}%` }}
                         />
                       </div>
                     </div>
@@ -762,32 +909,36 @@ export default function AdGuardHomeUI() {
           </div>
         )}
 
-        {/* VIEW 2: QUERY LOG (Authentic AdGuard Home Log Inspector) */}
+        {/* VIEW 2: QUERY LOG */}
         {activeNav === 'logs' && (
-          <div className="bg-[#1f2937] border border-slate-700/80 rounded-xl p-5 shadow-sm space-y-4">
-            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+          <div
+            className={`p-6 rounded-2xl border space-y-4 shadow-sm ${
+              isDark ? 'bg-[#101726] border-slate-800' : 'bg-white border-slate-200'
+            }`}
+          >
+            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
               <div>
-                <h3 className="text-base font-bold text-white">Query Log</h3>
-                <p className="text-xs text-slate-400">Detailed records of queries processed by AdGuard Web.</p>
+                <h3 className={`text-lg font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>Real-Time Query Log</h3>
+                <p className="text-xs text-slate-500">Live stream of DNS queries resolved by AdvGuard.</p>
               </div>
 
-              <div className="flex items-center gap-2 text-xs">
-                {/* Auto-refresh Switch */}
+              <div className="flex items-center gap-2">
                 <button
-                  onClick={() => setAutoRefresh(!autoRefresh)}
-                  className={`px-3 py-1.5 rounded-lg border font-medium flex items-center gap-1.5 transition ${
-                    autoRefresh
-                      ? 'bg-[#2db365]/10 text-[#2db365] border-[#2db365]/30'
-                      : 'bg-slate-800 text-slate-400 border-slate-700'
-                  }`}
+                  onClick={exportLogsToCsv}
+                  className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-xs font-bold rounded-xl flex items-center gap-1.5 transition"
                 >
-                  <RefreshCw className={`w-3.5 h-3.5 ${autoRefresh ? 'animate-spin' : ''}`} />
-                  Auto-refresh: {autoRefresh ? '3s' : 'OFF'}
+                  <FileDown className="w-3.5 h-3.5" /> Export CSV
+                </button>
+                <button
+                  onClick={clearLogs}
+                  className="px-3 py-1.5 bg-rose-500/10 hover:bg-rose-500/20 text-rose-500 border border-rose-500/30 text-xs font-bold rounded-xl flex items-center gap-1.5 transition"
+                >
+                  <Trash2 className="w-3.5 h-3.5" /> Clear
                 </button>
               </div>
             </div>
 
-            {/* Filter Controls Row */}
+            {/* Filter Bar */}
             <div className="flex flex-col sm:flex-row gap-3">
               <div className="relative flex-1">
                 <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
@@ -795,32 +946,36 @@ export default function AdGuardHomeUI() {
                   type="text"
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Search by domain, client IP, or rule..."
-                  className="w-full bg-[#111827] border border-slate-700 rounded-lg pl-9 pr-3 py-2 text-xs text-white placeholder-slate-500 font-mono focus:outline-none focus:border-[#2db365]"
+                  placeholder="Filter by domain or client..."
+                  className={`w-full border rounded-xl pl-9 pr-3 py-2 text-xs font-mono focus:outline-none focus:border-emerald-500 ${
+                    isDark ? 'bg-slate-950 border-slate-800 text-white' : 'bg-slate-50 border-slate-300 text-slate-900'
+                  }`}
                 />
               </div>
 
-              <div className="flex items-center gap-1 bg-[#111827] border border-slate-700 p-1 rounded-lg text-xs">
+              <div className="flex items-center gap-1 p-1 rounded-xl border text-xs bg-slate-100 dark:bg-slate-950 border-slate-200 dark:border-slate-800">
                 <button
                   onClick={() => setLogStatusFilter('all')}
-                  className={`px-3 py-1 rounded font-medium transition ${
-                    logStatusFilter === 'all' ? 'bg-slate-700 text-white' : 'text-slate-400 hover:text-white'
+                  className={`px-3 py-1 rounded-lg font-bold transition ${
+                    logStatusFilter === 'all'
+                      ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white shadow-sm'
+                      : 'text-slate-500 hover:text-slate-900 dark:hover:text-white'
                   }`}
                 >
                   All ({logs.length})
                 </button>
                 <button
                   onClick={() => setLogStatusFilter('blocked')}
-                  className={`px-3 py-1 rounded font-medium transition ${
-                    logStatusFilter === 'blocked' ? 'bg-rose-500/20 text-rose-300' : 'text-slate-400 hover:text-rose-300'
+                  className={`px-3 py-1 rounded-lg font-bold transition ${
+                    logStatusFilter === 'blocked' ? 'bg-rose-500 text-white' : 'text-slate-500 hover:text-rose-500'
                   }`}
                 >
                   Blocked
                 </button>
                 <button
                   onClick={() => setLogStatusFilter('processed')}
-                  className={`px-3 py-1 rounded font-medium transition ${
-                    logStatusFilter === 'processed' ? 'bg-[#2db365]/20 text-[#2db365]' : 'text-slate-400 hover:text-[#2db365]'
+                  className={`px-3 py-1 rounded-lg font-bold transition ${
+                    logStatusFilter === 'processed' ? 'bg-emerald-600 text-white' : 'text-slate-500 hover:text-emerald-500'
                   }`}
                 >
                   Processed
@@ -828,149 +983,297 @@ export default function AdGuardHomeUI() {
               </div>
             </div>
 
-            {/* Queries Table */}
-            <div className="overflow-x-auto rounded-lg border border-slate-700 max-h-[550px]">
+            {/* Log Table */}
+            <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800 max-h-[550px]">
               <table className="w-full text-left text-xs font-mono">
-                <thead className="bg-[#182230] text-slate-300 uppercase tracking-wider border-b border-slate-700">
+                <thead
+                  className={`uppercase tracking-wider border-b ${
+                    isDark ? 'bg-slate-950 text-slate-400 border-slate-800' : 'bg-slate-100 text-slate-600 border-slate-200'
+                  }`}
+                >
                   <tr>
                     <th className="p-3 pl-4">Time</th>
                     <th className="p-3">Type</th>
                     <th className="p-3">Domain</th>
-                    <th className="p-3">Response / Status</th>
+                    <th className="p-3">Status</th>
                     <th className="p-3">Client</th>
                     <th className="p-3 pr-4 text-right">Action</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-800 bg-[#111827]">
-                  {filteredLogs.length === 0 ? (
-                    <tr>
-                      <td colSpan={6} className="p-8 text-center text-slate-500 text-xs">
-                        No queries found matching current filter.
+                <tbody className={`divide-y ${isDark ? 'divide-slate-800 bg-[#0c121f]' : 'divide-slate-200 bg-white'}`}>
+                  {filteredLogs.map((log) => (
+                    <tr key={log.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40 transition">
+                      <td className="p-3 pl-4 text-slate-400 whitespace-nowrap">
+                        {new Date(log.timestamp).toLocaleTimeString()}
+                      </td>
+                      <td className="p-3 text-slate-400">{log.type}</td>
+                      <td className="p-3 font-semibold">{log.domain}</td>
+                      <td className="p-3">
+                        {log.blocked ? (
+                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-rose-500/10 text-rose-500 border border-rose-500/20">
+                            BLOCKED ({log.ruleMatched || '0.0.0.0'})
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-emerald-500/10 text-emerald-500 border border-emerald-500/20">
+                            RESOLVED ({log.elapsedMs} ms)
+                          </span>
+                        )}
+                      </td>
+                      <td className="p-3 font-sans text-slate-400">{log.clientIp}</td>
+                      <td className="p-3 pr-4 text-right">
+                        {!log.blocked ? (
+                          <button
+                            onClick={() => quickBlock(log.domain)}
+                            className="px-2.5 py-1 bg-rose-500/10 hover:bg-rose-500/20 text-rose-500 border border-rose-500/30 rounded text-[10px] font-bold transition"
+                          >
+                            Block
+                          </button>
+                        ) : (
+                          <span className="text-slate-400 text-[10px]">Blocked</span>
+                        )}
                       </td>
                     </tr>
-                  ) : (
-                    filteredLogs.map((log) => (
-                      <tr key={log.id} className="hover:bg-slate-800/40 transition">
-                        <td className="p-3 pl-4 text-slate-400 whitespace-nowrap">
-                          {new Date(log.timestamp).toLocaleTimeString()}
-                        </td>
-                        <td className="p-3 text-slate-400">{log.type}</td>
-                        <td className="p-3 font-semibold text-slate-100">{log.domain}</td>
-                        <td className="p-3">
-                          {log.blocked ? (
-                            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded text-[11px] font-bold bg-rose-500/20 text-rose-400 border border-rose-500/30">
-                              <XCircle className="w-3 h-3" /> Blocked ({log.ruleMatched || '0.0.0.0'})
-                            </span>
-                          ) : (
-                            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded text-[11px] font-bold bg-[#2db365]/20 text-[#2db365] border border-[#2db365]/30">
-                              <CheckCircle2 className="w-3 h-3" /> Processed ({log.elapsedMs} ms)
-                            </span>
-                          )}
-                        </td>
-                        <td className="p-3 text-slate-300 font-sans">{log.clientIp}</td>
-                        <td className="p-3 pr-4 text-right">
-                          {!log.blocked ? (
-                            <button
-                              onClick={() => quickBlock(log.domain)}
-                              className="px-2 py-0.5 bg-rose-600 hover:bg-rose-500 text-white rounded text-[10px] font-semibold transition"
-                            >
-                              Block
-                            </button>
-                          ) : (
-                            <span className="text-slate-500 text-[10px]">Blocked</span>
-                          )}
-                        </td>
-                      </tr>
-                    ))
-                  )}
+                  ))}
                 </tbody>
               </table>
             </div>
           </div>
         )}
 
-        {/* VIEW 3: FILTERS (Blocklists, Blocked Services, Custom Rules, Rewrites) */}
-        {activeNav === 'filters' && (
+        {/* VIEW 3: SMART FIREWALL (Killer feature AdGuard does NOT have) */}
+        {activeNav === 'firewall' && (
           <div className="space-y-6">
-            {/* SUB-TAB 1: DNS Blocklists */}
-            {filtersSubTab === 'blocklists' && (
-              <div className="bg-[#1f2937] border border-slate-700/80 rounded-xl p-5 shadow-sm space-y-4">
-                <div className="flex items-center justify-between pb-3 border-b border-slate-700">
-                  <div>
-                    <h3 className="text-base font-bold text-white">DNS Blocklists</h3>
-                    <p className="text-xs text-slate-400">
-                      Rule lists used to block ads, tracking, and malware domains.
-                    </p>
+            <div
+              className={`p-6 rounded-2xl border space-y-4 shadow-sm ${
+                isDark ? 'bg-[#101726] border-slate-800' : 'bg-white border-slate-200'
+              }`}
+            >
+              <div className="flex items-center justify-between pb-4 border-b border-slate-200 dark:border-slate-800">
+                <div>
+                  <h3 className={`text-lg font-bold flex items-center gap-2 ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                    <Flame className="w-5 h-5 text-amber-500" /> AdvGuard Smart DNS Firewall
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    Next-generation behavioral heuristics, spam TLD blocking, anti-bot protection, and cryptojacking defense.
+                  </p>
+                </div>
+                <div className="text-right">
+                  <div className="text-xs font-bold text-slate-400">Total Threats Neutralized</div>
+                  <div className="text-2xl font-black font-mono text-amber-500">
+                    {stats.firewall.blocksCount.toLocaleString()}
+                  </div>
+                </div>
+              </div>
+
+              {/* Threat Defense Level */}
+              <div className="space-y-2">
+                <label className="text-xs font-bold uppercase text-slate-400">Threat Defense Level</label>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  {[
+                    { id: 'low', name: 'Low', desc: 'Permissive' },
+                    { id: 'balanced', name: 'Balanced', desc: 'Recommended' },
+                    { id: 'strict', name: 'Strict', desc: 'Aggressive' },
+                    { id: 'paranoid', name: 'Paranoid', desc: 'Lockdown' },
+                  ].map((level) => (
+                    <button
+                      key={level.id}
+                      onClick={() => updateFirewall('threatLevel', level.id)}
+                      className={`p-3 rounded-xl border text-left transition ${
+                        stats.firewall.config.threatLevel === level.id
+                          ? 'bg-amber-500/10 border-amber-500 text-amber-500'
+                          : isDark
+                          ? 'bg-slate-950 border-slate-800 text-slate-400'
+                          : 'bg-slate-50 border-slate-200 text-slate-700'
+                      }`}
+                    >
+                      <div className="font-bold text-xs">{level.name}</div>
+                      <div className="text-[10px] text-slate-500">{level.desc}</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Firewall Security Toggles */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
+                {/* 1. Risky TLDs */}
+                <div
+                  className={`p-4 rounded-xl border flex items-center justify-between ${
+                    isDark ? 'bg-slate-950 border-slate-800' : 'bg-slate-50 border-slate-200'
+                  }`}
+                >
+                  <div className="space-y-0.5">
+                    <div className="font-bold text-xs text-white dark:text-white">Block High-Risk Spam TLDs</div>
+                    <div className="text-[11px] text-slate-500">
+                      Drops queries to `.top`, `.xyz`, `.work`, `.click`, `.surf` known for malware.
+                    </div>
                   </div>
                   <button
-                    onClick={fetchStats}
-                    className="px-3 py-1.5 bg-[#2db365] hover:bg-[#259b56] text-white rounded-lg text-xs font-semibold transition flex items-center gap-1.5"
+                    onClick={() => updateFirewall('blockRiskyTlds', !stats.firewall.config.blockRiskyTlds)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition ${
+                      stats.firewall.config.blockRiskyTlds ? 'bg-emerald-600 text-white' : 'bg-slate-700 text-slate-400'
+                    }`}
                   >
-                    <RefreshCw className="w-3.5 h-3.5" /> Check for updates
+                    {stats.firewall.config.blockRiskyTlds ? 'Active' : 'Disabled'}
                   </button>
                 </div>
 
-                <div className="divide-y divide-slate-700/80 rounded-lg border border-slate-700 overflow-hidden">
-                  {blocklists.map((list) => (
-                    <div key={list.id} className="p-4 bg-[#111827] flex items-center justify-between">
-                      <div className="space-y-1">
-                        <div className="flex items-center gap-2">
-                          <span className="font-bold text-sm text-white">{list.name}</span>
-                          <span className="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-700">
+                {/* 2. AI Scrapers & Crawlers */}
+                <div
+                  className={`p-4 rounded-xl border flex items-center justify-between ${
+                    isDark ? 'bg-slate-950 border-slate-800' : 'bg-slate-50 border-slate-200'
+                  }`}
+                >
+                  <div className="space-y-0.5">
+                    <div className="font-bold text-xs text-white dark:text-white">Block AI Scrapers & Harvesters</div>
+                    <div className="text-[11px] text-slate-500">
+                      Blocks OpenAI, Anthropic, Common Crawl, and ByteDance web scrapers.
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => updateFirewall('blockAiScrapers', !stats.firewall.config.blockAiScrapers)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition ${
+                      stats.firewall.config.blockAiScrapers ? 'bg-emerald-600 text-white' : 'bg-slate-700 text-slate-400'
+                    }`}
+                  >
+                    {stats.firewall.config.blockAiScrapers ? 'Active' : 'Disabled'}
+                  </button>
+                </div>
+
+                {/* 3. Cryptojacking & In-Browser Mining */}
+                <div
+                  className={`p-4 rounded-xl border flex items-center justify-between ${
+                    isDark ? 'bg-slate-950 border-slate-800' : 'bg-slate-50 border-slate-200'
+                  }`}
+                >
+                  <div className="space-y-0.5">
+                    <div className="font-bold text-xs text-white dark:text-white">Block In-Browser Cryptominers</div>
+                    <div className="text-[11px] text-slate-500">
+                      Stops websites from secretly hijacking your CPU to mine crypto (Coinhive, etc.).
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => updateFirewall('blockCryptoMiners', !stats.firewall.config.blockCryptoMiners)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition ${
+                      stats.firewall.config.blockCryptoMiners ? 'bg-emerald-600 text-white' : 'bg-slate-700 text-slate-400'
+                    }`}
+                  >
+                    {stats.firewall.config.blockCryptoMiners ? 'Active' : 'Disabled'}
+                  </button>
+                </div>
+
+                {/* 4. Anti-DDoS Rate Limiting */}
+                <div
+                  className={`p-4 rounded-xl border flex items-center justify-between ${
+                    isDark ? 'bg-slate-950 border-slate-800' : 'bg-slate-50 border-slate-200'
+                  }`}
+                >
+                  <div className="space-y-0.5">
+                    <div className="font-bold text-xs text-white dark:text-white">Anti-DDoS DNS Rate Limiting</div>
+                    <div className="text-[11px] text-slate-500">
+                      Caps requests per IP to 300/min to mitigate DNS amplification flood attacks.
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => updateFirewall('rateLimitEnabled', !stats.firewall.config.rateLimitEnabled)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition ${
+                      stats.firewall.config.rateLimitEnabled ? 'bg-emerald-600 text-white' : 'bg-slate-700 text-slate-400'
+                    }`}
+                  >
+                    {stats.firewall.config.rateLimitEnabled ? 'Active' : 'Disabled'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* VIEW 4: BLOCKLISTS & RULES */}
+        {activeNav === 'filters' && (
+          <div className="space-y-6">
+            {/* SUB-TAB 1: Curated AdvGuard Blocklists (by Veer Bhanushali) with Download */}
+            {filtersSubTab === 'curated' && (
+              <div
+                className={`p-6 rounded-2xl border space-y-4 shadow-sm ${
+                  isDark ? 'bg-[#101726] border-slate-800' : 'bg-white border-slate-200'
+                }`}
+              >
+                <div>
+                  <h3 className={`text-base font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                    Curated AdvGuard Master Blocklists (by Veer Bhanushali)
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    Hand-crafted, optimized blocklists. Download as raw text or load into any external adblocker.
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {stats.curatedLists.map((list) => (
+                    <div
+                      key={list.id}
+                      className={`p-5 rounded-xl border flex flex-col justify-between space-y-3 ${
+                        isDark ? 'bg-slate-950 border-slate-800' : 'bg-slate-50 border-slate-200'
+                      }`}
+                    >
+                      <div className="space-y-1.5">
+                        <div className="flex items-center justify-between">
+                          <span className="font-bold text-sm text-emerald-500">{list.name}</span>
+                          <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-500">
                             {list.category}
                           </span>
                         </div>
-                        <a
-                          href={list.url}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="text-xs text-[#2db365] hover:underline flex items-center gap-1 font-mono"
-                        >
-                          {list.url} <ExternalLink className="w-3 h-3" />
-                        </a>
-                        <div className="text-[11px] text-slate-400 font-mono">
-                          {list.count.toLocaleString()} rules • Synced in RAM
+                        <p className="text-xs text-slate-400">{list.description}</p>
+                        <div className="text-[11px] text-slate-500 font-mono">
+                          {list.count.toLocaleString()} rules • Curated by {list.curator} • {list.updatedAt}
                         </div>
                       </div>
 
-                      <button
-                        onClick={() => toggleBlocklist(list.id, list.enabled)}
-                        className={`px-4 py-1.5 rounded-lg text-xs font-bold transition ${
-                          list.enabled
-                            ? 'bg-[#2db365] hover:bg-[#259b56] text-white'
-                            : 'bg-slate-700 text-slate-400 hover:bg-slate-600'
-                        }`}
-                      >
-                        {list.enabled ? 'Enabled' : 'Disabled'}
-                      </button>
+                      <div className="flex items-center justify-between pt-2 border-t border-slate-800">
+                        <span className="text-xs text-emerald-500 font-bold flex items-center gap-1">
+                          <CheckCircle2 className="w-3.5 h-3.5" /> Built-in & Active
+                        </span>
+                        <a
+                          href={`/api/blocklists/download?id=${list.id}`}
+                          download={`${list.id}.txt`}
+                          className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 transition"
+                        >
+                          <Download className="w-3.5 h-3.5" /> Download .txt
+                        </a>
+                      </div>
                     </div>
                   ))}
                 </div>
               </div>
             )}
 
-            {/* SUB-TAB 2: Blocked Services (Official 1-Click Tile Grid) */}
+            {/* SUB-TAB 2: Blocked Services */}
             {filtersSubTab === 'services' && (
-              <div className="bg-[#1f2937] border border-slate-700/80 rounded-xl p-5 shadow-sm space-y-4">
-                <div className="pb-3 border-b border-slate-700">
-                  <h3 className="text-base font-bold text-white">Blocked Services</h3>
-                  <p className="text-xs text-slate-400">
-                    Quickly block popular websites and services on all devices with a single click.
+              <div
+                className={`p-6 rounded-2xl border space-y-4 shadow-sm ${
+                  isDark ? 'bg-[#101726] border-slate-800' : 'bg-white border-slate-200'
+                }`}
+              >
+                <div>
+                  <h3 className={`text-base font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                    1-Click Blocked Services
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    Instantly block social media, gaming, and streaming platforms across all connected devices.
                   </p>
                 </div>
 
                 <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
                   {services.map((service) => {
                     const isBlocked = stats.blockedServiceIds.includes(service.id);
-
                     return (
                       <div
                         key={service.id}
                         onClick={() => toggleBlockedService(service.id, isBlocked)}
-                        className={`p-3.5 rounded-xl border cursor-pointer select-none transition flex flex-col justify-between h-28 ${
+                        className={`p-4 rounded-xl border cursor-pointer select-none transition flex flex-col justify-between h-28 ${
                           isBlocked
-                            ? 'bg-rose-500/10 border-rose-500/50 shadow-sm'
-                            : 'bg-[#111827] border-slate-700 hover:border-slate-500'
+                            ? 'bg-rose-500/10 border-rose-500/40 text-rose-400'
+                            : isDark
+                            ? 'bg-slate-950 border-slate-800 hover:border-slate-700'
+                            : 'bg-slate-50 border-slate-200 hover:border-slate-300'
                         }`}
                       >
                         <div className="flex items-center justify-between">
@@ -984,8 +1287,8 @@ export default function AdGuardHomeUI() {
                           </span>
                         </div>
                         <div>
-                          <div className="font-bold text-sm text-white">{service.name}</div>
-                          <div className="text-[10px] text-slate-400">{service.category}</div>
+                          <div className="font-bold text-xs">{service.name}</div>
+                          <div className="text-[10px] text-slate-500">{service.category}</div>
                         </div>
                       </div>
                     );
@@ -994,13 +1297,72 @@ export default function AdGuardHomeUI() {
               </div>
             )}
 
-            {/* SUB-TAB 3: Custom Filtering Rules */}
+            {/* SUB-TAB 3: Subscribed Lists */}
+            {filtersSubTab === 'blocklists' && (
+              <div
+                className={`p-6 rounded-2xl border space-y-4 shadow-sm ${
+                  isDark ? 'bg-[#101726] border-slate-800' : 'bg-white border-slate-200'
+                }`}
+              >
+                <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+                  <div>
+                    <h3 className={`text-base font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                      DNS Blocklists
+                    </h3>
+                    <p className="text-xs text-slate-500">External blocklist subscriptions.</p>
+                  </div>
+                  <button
+                    onClick={fetchStats}
+                    className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-lg flex items-center gap-1.5 transition"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" /> Sync Lists
+                  </button>
+                </div>
+
+                <div className="divide-y divide-slate-800 rounded-xl border border-slate-800 overflow-hidden">
+                  {blocklists.map((list) => (
+                    <div key={list.id} className="p-4 bg-slate-950 flex items-center justify-between">
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2">
+                          <span className="font-bold text-sm text-white">{list.name}</span>
+                          <span className="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-400">
+                            {list.category}
+                          </span>
+                        </div>
+                        <div className="text-xs text-slate-500 font-mono">
+                          {list.count.toLocaleString()} rules • Active in RAM
+                        </div>
+                      </div>
+
+                      <button
+                        onClick={() => toggleBlocklist(list.id, list.enabled)}
+                        className={`px-4 py-1.5 rounded-lg text-xs font-bold transition ${
+                          list.enabled
+                            ? 'bg-emerald-600 text-white'
+                            : 'bg-slate-800 text-slate-400 hover:bg-slate-700'
+                        }`}
+                      >
+                        {list.enabled ? 'Enabled' : 'Disabled'}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* SUB-TAB 4: Custom Filtering Rules */}
             {filtersSubTab === 'custom' && (
-              <div className="bg-[#1f2937] border border-slate-700/80 rounded-xl p-5 shadow-sm space-y-4">
-                <div className="pb-3 border-b border-slate-700">
-                  <h3 className="text-base font-bold text-white">Custom Filtering Rules</h3>
-                  <p className="text-xs text-slate-400">
-                    Write custom rules using AdGuard syntax. One rule per line.
+              <div
+                className={`p-6 rounded-2xl border space-y-4 shadow-sm ${
+                  isDark ? 'bg-[#101726] border-slate-800' : 'bg-white border-slate-200'
+                }`}
+              >
+                <div>
+                  <h3 className={`text-base font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                    Custom Filtering Rules
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    Write custom rules using AdGuard syntax (`||domain.com^` to block, `@@||domain.com^` to allow).
                   </p>
                 </div>
 
@@ -1008,32 +1370,31 @@ export default function AdGuardHomeUI() {
                   <textarea
                     value={customRulesText}
                     onChange={(e) => setCustomRulesText(e.target.value)}
-                    placeholder={"! Add your rules here\n||example.org^\n@@||safe-site.com^\n127.0.0.1 test.local"}
-                    rows={8}
-                    className="w-full bg-[#111827] border border-slate-700 rounded-lg p-3 text-xs font-mono text-[#2db365] placeholder-slate-600 focus:outline-none focus:border-[#2db365]"
+                    placeholder={"||ads.example.com^\n@@||safe-subdomain.com^\n127.0.0.1 test.dev"}
+                    rows={6}
+                    className={`w-full border rounded-xl p-3 text-xs font-mono focus:outline-none focus:border-emerald-500 ${
+                      isDark ? 'bg-slate-950 border-slate-800 text-emerald-400' : 'bg-slate-50 border-slate-300 text-emerald-600'
+                    }`}
                   />
                   <div className="flex items-center justify-between">
                     <button
-                      onClick={addCustomRuleFromEditor}
-                      className="px-4 py-2 bg-[#2db365] hover:bg-[#259b56] text-white rounded-lg text-xs font-semibold transition"
+                      onClick={addCustomRule}
+                      className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold transition"
                     >
                       Apply Rules
                     </button>
-                    {ruleMessage && <span className="text-xs text-[#2db365] font-semibold">{ruleMessage}</span>}
+                    {ruleMessage && <span className="text-xs text-emerald-500 font-bold">{ruleMessage}</span>}
                   </div>
                 </div>
 
                 {rules.length > 0 && (
-                  <div className="mt-4 space-y-2">
-                    <h4 className="text-xs font-bold text-slate-300 uppercase">Active Custom Rules ({rules.length})</h4>
-                    <div className="divide-y divide-slate-800 rounded-lg border border-slate-700 bg-[#111827] max-h-60 overflow-y-auto">
+                  <div className="space-y-2 pt-2">
+                    <h4 className="text-xs font-bold uppercase text-slate-400">Active Rules ({rules.length})</h4>
+                    <div className="divide-y divide-slate-800 rounded-xl border border-slate-800 bg-slate-950 max-h-60 overflow-y-auto">
                       {rules.map((rule) => (
-                        <div key={rule.id} className="p-2.5 px-3 flex items-center justify-between text-xs font-mono">
+                        <div key={rule.id} className="p-3 flex items-center justify-between text-xs font-mono">
                           <span className="text-slate-200">{rule.pattern}</span>
-                          <button
-                            onClick={() => deleteRule(rule.id)}
-                            className="text-slate-500 hover:text-rose-400 transition"
-                          >
+                          <button onClick={() => deleteRule(rule.id)} className="text-slate-500 hover:text-rose-500">
                             <Trash2 className="w-3.5 h-3.5" />
                           </button>
                         </div>
@@ -1044,14 +1405,16 @@ export default function AdGuardHomeUI() {
               </div>
             )}
 
-            {/* SUB-TAB 4: DNS Rewrites */}
+            {/* SUB-TAB 5: DNS Rewrites */}
             {filtersSubTab === 'rewrites' && (
-              <div className="bg-[#1f2937] border border-slate-700/80 rounded-xl p-5 shadow-sm space-y-4">
-                <div className="pb-3 border-b border-slate-700">
-                  <h3 className="text-base font-bold text-white">DNS Rewrites</h3>
-                  <p className="text-xs text-slate-400">
-                    Return a custom IP address for a specific domain name.
-                  </p>
+              <div
+                className={`p-6 rounded-2xl border space-y-4 shadow-sm ${
+                  isDark ? 'bg-[#101726] border-slate-800' : 'bg-white border-slate-200'
+                }`}
+              >
+                <div>
+                  <h3 className={`text-base font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>DNS Rewrites</h3>
+                  <p className="text-xs text-slate-500">Map internal domain names to specific IP addresses.</p>
                 </div>
 
                 <form onSubmit={addRewrite} className="flex flex-col sm:flex-row gap-2">
@@ -1060,32 +1423,36 @@ export default function AdGuardHomeUI() {
                     value={rewriteDomain}
                     onChange={(e) => setRewriteDomain(e.target.value)}
                     placeholder="Domain (e.g. dev.local)"
-                    className="flex-1 bg-[#111827] border border-slate-700 rounded-lg px-3 py-2 text-xs text-white placeholder-slate-500 font-mono focus:outline-none focus:border-[#2db365]"
+                    className={`flex-1 border rounded-xl px-3 py-2 text-xs font-mono focus:outline-none focus:border-emerald-500 ${
+                      isDark ? 'bg-slate-950 border-slate-800 text-white' : 'bg-slate-50 border-slate-300 text-slate-900'
+                    }`}
                   />
                   <input
                     type="text"
                     value={rewriteIp}
                     onChange={(e) => setRewriteIp(e.target.value)}
-                    placeholder="Answer (e.g. 192.168.1.100)"
-                    className="flex-1 bg-[#111827] border border-slate-700 rounded-lg px-3 py-2 text-xs text-white placeholder-slate-500 font-mono focus:outline-none focus:border-[#2db365]"
+                    placeholder="Answer IP (e.g. 192.168.1.100)"
+                    className={`flex-1 border rounded-xl px-3 py-2 text-xs font-mono focus:outline-none focus:border-emerald-500 ${
+                      isDark ? 'bg-slate-950 border-slate-800 text-white' : 'bg-slate-50 border-slate-300 text-slate-900'
+                    }`}
                   />
                   <button
                     type="submit"
-                    className="px-4 py-2 bg-[#2db365] hover:bg-[#259b56] text-white rounded-lg text-xs font-semibold transition"
+                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold transition"
                   >
                     Add Rewrite
                   </button>
                 </form>
 
                 {stats.rewrites.length > 0 && (
-                  <div className="divide-y divide-slate-800 rounded-lg border border-slate-700 bg-[#111827]">
+                  <div className="divide-y divide-slate-800 rounded-xl border border-slate-800 bg-slate-950">
                     {stats.rewrites.map((r) => (
                       <div key={r.id} className="p-3 flex items-center justify-between text-xs font-mono">
                         <div>
                           <strong className="text-white">{r.domain}</strong> &rarr;{' '}
-                          <span className="text-[#2db365]">{r.answer}</span>
+                          <span className="text-emerald-500">{r.answer}</span>
                         </div>
-                        <button onClick={() => deleteRewrite(r.id)} className="text-slate-500 hover:text-rose-400">
+                        <button onClick={() => deleteRewrite(r.id)} className="text-slate-500 hover:text-rose-500">
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
                       </div>
@@ -1097,245 +1464,353 @@ export default function AdGuardHomeUI() {
           </div>
         )}
 
-        {/* VIEW 4: SETUP GUIDE */}
-        {activeNav === 'guide' && (
-          <div className="bg-[#1f2937] border border-slate-700/80 rounded-xl p-6 shadow-sm space-y-6">
-            <div>
-              <h3 className="text-base font-bold text-white">Device Setup Guide</h3>
-              <p className="text-xs text-slate-400">
-                Connect any smartphone, laptop, or browser to your AdGuard Web instance.
-              </p>
-            </div>
-
-            {/* Custom Device Tag Router */}
-            <div className="p-4 bg-[#111827] rounded-xl border border-slate-700 space-y-3">
-              <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3">
-                <span className="text-xs text-slate-300 font-medium">Device Tag:</span>
-                <input
-                  type="text"
-                  value={deviceTag}
-                  onChange={(e) => setDeviceTag(e.target.value.toLowerCase().replace(/[^a-z0-9-_]/g, ''))}
-                  placeholder="e.g. phone, laptop, tv"
-                  className="bg-slate-900 border border-slate-700 rounded-md px-3 py-1.5 text-xs text-white font-mono focus:outline-none focus:border-[#2db365]"
-                />
-              </div>
-
-              <div className="text-xs space-y-1">
-                <span className="text-slate-400">Your Personalized DoH URL:</span>
-                <div className="flex items-center gap-2 bg-slate-900 p-2 rounded-lg border border-slate-700">
-                  <code className="text-[#2db365] font-mono flex-1 select-all truncate">
-                    {hostUrl ? `${hostUrl}/dns-query/${deviceTag || 'default'}` : ''}
-                  </code>
-                  <button
-                    onClick={() => copyUrl(`${hostUrl}/dns-query/${deviceTag || 'default'}`)}
-                    className="px-3 py-1 bg-[#2db365] hover:bg-[#259b56] text-white rounded text-xs font-semibold transition"
-                  >
-                    Copy
-                  </button>
+        {/* VIEW 5: DEVICES & USERS (Multi-Tenancy) */}
+        {activeNav === 'users' && (
+          <div className="space-y-6">
+            <div
+              className={`p-6 rounded-2xl border space-y-6 shadow-sm ${
+                isDark ? 'bg-[#101726] border-slate-800' : 'bg-white border-slate-200'
+              }`}
+            >
+              <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 pb-4 border-b border-slate-800">
+                <div>
+                  <h3 className={`text-lg font-bold flex items-center gap-2 ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                    <Users className="w-5 h-5 text-emerald-500" /> Authorized Devices & Multi-User Management
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    Assign individual devices and client endpoints. Monitor per-device query traffic.
+                  </p>
                 </div>
-              </div>
-            </div>
 
-            {/* Platform Guides */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {/* iOS */}
-              <div className="p-4 bg-[#111827] rounded-xl border border-slate-700 space-y-2.5">
-                <div className="font-bold text-sm text-white flex items-center gap-2">
-                  <Smartphone className="w-4 h-4 text-sky-400" /> iPhone & iPad
-                </div>
-                <p className="text-xs text-slate-400">
-                  Download our official 1-Click Apple `.mobileconfig` encrypted DNS profile directly via Safari.
-                </p>
-                <a
-                  href="/api/mobileconfig"
-                  download="adguard-web.mobileconfig"
-                  className="inline-flex items-center gap-2 px-3.5 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded-lg text-xs font-semibold transition"
+                <button
+                  onClick={() => setShowAddDeviceModal(true)}
+                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition"
                 >
-                  <Download className="w-3.5 h-3.5" /> Download iOS Profile
-                </a>
+                  <Plus className="w-4 h-4" /> Register New Device
+                </button>
               </div>
 
-              {/* Android */}
-              <div className="p-4 bg-[#111827] rounded-xl border border-slate-700 space-y-2.5">
-                <div className="font-bold text-sm text-white flex items-center gap-2">
-                  <Smartphone className="w-4 h-4 text-[#2db365]" /> Android (5G & Wi-Fi)
+              {/* Devices Table */}
+              <div className="space-y-3">
+                <h4 className="text-xs font-bold uppercase text-slate-400">Connected Device Profiles ({stats.devices.length})</h4>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  {stats.devices.map((dev) => (
+                    <div
+                      key={dev.id}
+                      className={`p-4 rounded-xl border flex flex-col justify-between space-y-3 ${
+                        isDark ? 'bg-slate-950 border-slate-800' : 'bg-slate-50 border-slate-200'
+                      }`}
+                    >
+                      <div className="space-y-1">
+                        <div className="flex items-center justify-between">
+                          <span className="font-bold text-sm">{dev.name}</span>
+                          <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-500 border border-emerald-500/20">
+                            {dev.status.toUpperCase()}
+                          </span>
+                        </div>
+                        <div className="text-xs text-slate-400 font-mono">Token: {dev.token}</div>
+                        <div className="text-[11px] text-slate-500">
+                          {dev.totalQueries.toLocaleString()} queries • {dev.blockedQueries.toLocaleString()} blocked
+                        </div>
+                      </div>
+
+                      <div className="pt-2 border-t border-slate-800 flex items-center justify-between text-xs">
+                        <button
+                          onClick={() => copyText(`https://${PUBLIC_DOMAIN}/dns-query/${dev.token}`)}
+                          className="text-emerald-500 font-bold hover:underline flex items-center gap-1"
+                        >
+                          <Copy className="w-3 h-3" /> Copy DoH URL
+                        </button>
+                        <button onClick={() => deleteDevice(dev.id)} className="text-slate-500 hover:text-rose-500">
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
                 </div>
-                <p className="text-xs text-slate-400">
-                  In <strong>Intra</strong> or <strong>RethinkDNS</strong>, set Custom DNS-over-HTTPS URL to:
-                </p>
-                <code className="block bg-slate-900 p-2 rounded text-[#2db365] font-mono text-xs select-all">
-                  {hostUrl}/dns-query/{deviceTag}
-                </code>
               </div>
 
-              {/* Chrome / Edge / Brave */}
-              <div className="p-4 bg-[#111827] rounded-xl border border-slate-700 space-y-2.5">
-                <div className="font-bold text-sm text-white flex items-center gap-2">
-                  <Laptop className="w-4 h-4 text-purple-400" /> Chrome / Edge / Brave
+              {/* Add Device Modal Form */}
+              {showAddDeviceModal && (
+                <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                  <div
+                    className={`max-w-md w-full p-6 rounded-2xl border space-y-4 shadow-2xl ${
+                      isDark ? 'bg-slate-900 border-slate-800 text-white' : 'bg-white border-slate-200 text-slate-900'
+                    }`}
+                  >
+                    <h4 className="font-bold text-base">Register New Device Profile</h4>
+                    <form onSubmit={registerDevice} className="space-y-3 text-xs">
+                      <div className="space-y-1">
+                        <label className="text-slate-400">Device Name</label>
+                        <input
+                          type="text"
+                          value={newDevName}
+                          onChange={(e) => setNewDevName(e.target.value)}
+                          placeholder="e.g. Sister's iPhone, Work Laptop"
+                          className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs text-white"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-slate-400">Custom Device Tag / Token</label>
+                        <input
+                          type="text"
+                          value={newDevToken}
+                          onChange={(e) => setNewDevToken(e.target.value.toLowerCase().replace(/[^a-z0-9-_]/g, ''))}
+                          placeholder="e.g. sister-phone"
+                          className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs text-white font-mono"
+                        />
+                      </div>
+                      <div className="flex items-center justify-end gap-2 pt-2">
+                        <button
+                          type="button"
+                          onClick={() => setShowAddDeviceModal(false)}
+                          className="px-4 py-2 bg-slate-800 text-slate-300 rounded-xl"
+                        >
+                          Cancel
+                        </button>
+                        <button type="submit" className="px-4 py-2 bg-emerald-600 text-white font-bold rounded-xl">
+                          Register Device
+                        </button>
+                      </div>
+                    </form>
+                  </div>
                 </div>
-                <p className="text-xs text-slate-400">
-                  Go to <strong>Settings &gt; Privacy and security &gt; Security &gt; Use Secure DNS</strong>.
-                  Select <strong>Custom</strong> and enter:
-                </p>
-                <code className="block bg-slate-900 p-2 rounded text-purple-300 font-mono text-xs select-all">
-                  {hostUrl}/dns-query
-                </code>
-              </div>
-
-              {/* Hostinger & Vercel */}
-              <div className="p-4 bg-[#111827] rounded-xl border border-slate-700 space-y-2.5">
-                <div className="font-bold text-sm text-white flex items-center gap-2">
-                  <Globe className="w-4 h-4 text-[#2db365]" /> Hostinger / Vercel
-                </div>
-                <p className="text-xs text-slate-400">
-                  Upload this repository to Hostinger Node.js plan or Vercel. Works with free automated HTTPS SSL!
-                </p>
-              </div>
+              )}
             </div>
           </div>
         )}
 
-        {/* VIEW 5: SETTINGS */}
-        {activeNav === 'settings' && (
-          <div className="bg-[#1f2937] border border-slate-700/80 rounded-xl p-6 shadow-sm space-y-6">
-            {/* General Settings */}
-            {settingsSubTab === 'general' && (
-              <div className="space-y-6">
+        {/* VIEW 6: SETUP GUIDE */}
+        {activeNav === 'guide' && (
+          <div
+            className={`p-6 rounded-2xl border space-y-6 shadow-sm ${
+              isDark ? 'bg-[#101726] border-slate-800' : 'bg-white border-slate-200'
+            }`}
+          >
+            {/* Guide: Free Public DNS */}
+            {guideSubTab === 'public' && (
+              <div className="space-y-4">
                 <div>
-                  <h3 className="text-base font-bold text-white">General Settings</h3>
-                  <p className="text-xs text-slate-400">Control security filters and browsing protection.</p>
-                </div>
-
-                <div className="space-y-4">
-                  <div className="flex items-center justify-between p-4 bg-[#111827] rounded-xl border border-slate-700">
-                    <div>
-                      <div className="font-bold text-sm text-white">Safe Browsing</div>
-                      <div className="text-xs text-slate-400">Blocks known malware and phishing domains.</div>
-                    </div>
-                    <button
-                      onClick={toggleSafeBrowsing}
-                      className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition ${
-                        stats.safeBrowsingEnabled ? 'bg-[#2db365] text-white' : 'bg-slate-700 text-slate-400'
-                      }`}
-                    >
-                      {stats.safeBrowsingEnabled ? 'Enabled' : 'Disabled'}
-                    </button>
-                  </div>
-
-                  <div className="flex items-center justify-between p-4 bg-[#111827] rounded-xl border border-slate-700">
-                    <div>
-                      <div className="font-bold text-sm text-white">SafeSearch</div>
-                      <div className="text-xs text-slate-400">Enforces SafeSearch on Google, Bing, and YouTube.</div>
-                    </div>
-                    <button
-                      onClick={toggleSafeSearch}
-                      className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition ${
-                        stats.safeSearchEnabled ? 'bg-[#2db365] text-white' : 'bg-slate-700 text-slate-400'
-                      }`}
-                    >
-                      {stats.safeSearchEnabled ? 'Enabled' : 'Disabled'}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* DNS Settings */}
-            {settingsSubTab === 'dns' && (
-              <div className="space-y-6">
-                <div>
-                  <h3 className="text-base font-bold text-white">DNS Settings</h3>
-                  <p className="text-xs text-slate-400">Configure upstream encrypted DNS resolvers.</p>
-                </div>
-
-                <div className="space-y-3">
-                  <label className="text-xs font-bold text-slate-300">Upstream DNS servers</label>
-                  <div className="p-3 bg-[#111827] rounded-lg border border-slate-700 space-y-2 font-mono text-xs">
-                    <div className="flex items-center justify-between">
-                      <span className="text-slate-200">https://dns.quad9.net/dns-query</span>
-                      <span className="text-[#2db365] font-semibold">Primary (No-Log)</span>
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <span className="text-slate-200">https://cloudflare-dns.com/dns-query</span>
-                      <span className="text-sky-400 font-semibold">Secondary</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* Cloud Storage Settings */}
-            {settingsSubTab === 'cloud' && (
-              <div className="space-y-6">
-                <div>
-                  <h3 className="text-base font-bold text-white">Single Database: Supabase PostgreSQL</h3>
-                  <p className="text-xs text-slate-400">
-                    No Redis needed! One 100% free Supabase database handles query logs, custom rules, and authentication.
+                  <h3 className={`text-base font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                    Use AdvGuard Free Public DNS (Zero Installation)
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    Host it on your phone or computer right now using our official public server.
                   </p>
                 </div>
 
-                <div className="p-4 bg-[#111827] rounded-xl border border-slate-700 flex items-center justify-between">
-                  <div className="space-y-1">
-                    <div className="font-bold text-sm text-white flex items-center gap-2">
-                      <Database className="w-4 h-4 text-[#2db365]" /> Supabase PostgreSQL (Single DB)
-                    </div>
-                    <div className="text-xs text-slate-400">
-                      Stores query logs, custom rules, blocklists, and rewrites with built-in Auth & RLS.
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="p-4 bg-slate-950 rounded-xl border border-slate-800 space-y-2">
+                    <span className="font-bold text-xs text-emerald-400">DNS-over-HTTPS (DoH) URL:</span>
+                    <div className="flex items-center gap-2 bg-slate-900 p-2 rounded-lg border border-slate-800 font-mono text-xs">
+                      <code className="text-emerald-400 flex-1 truncate select-all">
+                        https://advgaurd.veerbhanushali.com/dns-query
+                      </code>
+                      <button
+                        onClick={() => copyText('https://advgaurd.veerbhanushali.com/dns-query')}
+                        className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-[11px] font-bold"
+                      >
+                        Copy
+                      </button>
                     </div>
                   </div>
-                  <span
-                    className={`px-3 py-1 rounded-full text-xs font-bold border ${
-                      cloud.supabaseConnected
-                        ? 'bg-[#2db365]/20 text-[#2db365] border-[#2db365]/30'
-                        : 'bg-slate-800 text-slate-400 border-slate-700'
-                    }`}
+
+                  <div className="p-4 bg-slate-950 rounded-xl border border-slate-800 space-y-2">
+                    <span className="font-bold text-xs text-sky-400">Android Private DNS Hostname:</span>
+                    <div className="flex items-center gap-2 bg-slate-900 p-2 rounded-lg border border-slate-800 font-mono text-xs">
+                      <code className="text-sky-400 flex-1 truncate select-all">advgaurd.veerbhanushali.com</code>
+                      <button
+                        onClick={() => copyText('advgaurd.veerbhanushali.com')}
+                        className="px-2.5 py-1 bg-sky-600 hover:bg-sky-500 text-white rounded text-[11px] font-bold"
+                      >
+                        Copy
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Guide: iOS */}
+            {guideSubTab === 'ios' && (
+              <div className="space-y-4">
+                <div>
+                  <h3 className={`text-base font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                    Apple iOS & iPadOS Setup (1-Click Profile)
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    Installs an official encrypted DNS configuration directly into iOS Settings. Zero apps required.
+                  </p>
+                </div>
+
+                <div className="p-5 bg-slate-950 rounded-xl border border-slate-800 space-y-3">
+                  <p className="text-xs text-slate-300">
+                    1. Open this website in Safari on your iPhone or iPad.
+                  </p>
+                  <p className="text-xs text-slate-300">
+                    2. Click the button below to download the signed `.mobileconfig` profile:
+                  </p>
+                  <a
+                    href="/api/mobileconfig"
+                    download="advguard.mobileconfig"
+                    className="inline-flex items-center gap-2 px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl text-xs transition"
                   >
-                    {cloud.supabaseConnected ? 'Connected (Cloud)' : 'Local In-Memory Mode'}
-                  </span>
-                </div>
-
-                <div className="p-4 bg-slate-900 rounded-xl border border-[#2db365]/30 space-y-2 text-xs">
-                  <span className="font-bold text-white flex items-center gap-1.5">
-                    <Code className="w-4 h-4 text-[#2db365]" /> 1-Click Database Setup Instructions:
-                  </span>
-                  <p className="text-slate-300">
-                    1. Open your project at <a href="https://supabase.com" target="_blank" rel="noreferrer" className="text-[#2db365] underline">supabase.com</a>.
-                  </p>
-                  <p className="text-slate-300">
-                    2. Go to <strong>SQL Editor</strong> in the left sidebar.
-                  </p>
-                  <p className="text-slate-300">
-                    3. Copy the entire contents of <code className="bg-slate-800 px-1.5 py-0.5 rounded text-[#2db365] font-mono">supabase-schema.sql</code> and click <strong>Run</strong>.
-                  </p>
-                  <p className="text-slate-300">
-                    4. Add your <code className="bg-slate-800 px-1.5 py-0.5 rounded text-sky-400 font-mono">NEXT_PUBLIC_SUPABASE_URL</code> and <code className="bg-slate-800 px-1.5 py-0.5 rounded text-sky-400 font-mono">NEXT_PUBLIC_SUPABASE_ANON_KEY</code> in <code className="font-mono text-white">.env.local</code>.
+                    <Download className="w-4 h-4" /> Download 1-Click iOS Profile
+                  </a>
+                  <p className="text-xs text-slate-400 pt-2">
+                    3. Open <strong>Settings &gt; Profile Downloaded &gt; Install</strong>.
                   </p>
                 </div>
               </div>
             )}
+
+            {/* Guide: Android */}
+            {guideSubTab === 'android' && (
+              <div className="space-y-4">
+                <div>
+                  <h3 className={`text-base font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                    Android Setup (5G & Wi-Fi)
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    System-wide ad-blocking across all Android apps, browsers, and mobile games.
+                  </p>
+                </div>
+
+                <div className="p-5 bg-slate-950 rounded-xl border border-slate-800 space-y-3 text-xs text-slate-300">
+                  <div className="font-bold text-emerald-400">Method 1: Native Private DNS (Recommended)</div>
+                  <p>1. Go to <strong>Settings &gt; Network &amp; internet &gt; Private DNS</strong>.</p>
+                  <p>2. Select <strong>Private DNS provider hostname</strong>.</p>
+                  <p>3. Enter:</p>
+                  <code className="block bg-slate-900 p-2 rounded text-emerald-400 font-mono select-all">
+                    advgaurd.veerbhanushali.com
+                  </code>
+                </div>
+              </div>
+            )}
+
+            {/* Guide: Windows */}
+            {guideSubTab === 'windows' && (
+              <div className="space-y-4">
+                <div>
+                  <h3 className={`text-base font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                    Windows 11 / 10 DNS-over-HTTPS Setup
+                  </h3>
+                  <p className="text-xs text-slate-500">Native Windows encrypted DNS resolution.</p>
+                </div>
+
+                <div className="p-5 bg-slate-950 rounded-xl border border-slate-800 space-y-2 text-xs text-slate-300">
+                  <p>1. Open <strong>Settings &gt; Network &amp; internet &gt; Wi-Fi (or Ethernet) &gt; Hardware properties</strong>.</p>
+                  <p>2. Click <strong>Edit</strong> next to DNS server assignment.</p>
+                  <p>3. Switch to <strong>Manual</strong>, enable <strong>IPv4</strong>, and enter DoH template:</p>
+                  <code className="block bg-slate-900 p-2 rounded text-emerald-400 font-mono select-all">
+                    https://advgaurd.veerbhanushali.com/dns-query
+                  </code>
+                </div>
+              </div>
+            )}
+
+            {/* Guide: Browsers */}
+            {guideSubTab === 'browser' && (
+              <div className="space-y-4">
+                <div>
+                  <h3 className={`text-base font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                    Desktop Browser Secure DNS
+                  </h3>
+                  <p className="text-xs text-slate-500">Chrome, Edge, Brave, and Firefox.</p>
+                </div>
+
+                <div className="p-5 bg-slate-950 rounded-xl border border-slate-800 space-y-2 text-xs text-slate-300">
+                  <p>1. Open browser <strong>Settings &gt; Privacy and security &gt; Security</strong>.</p>
+                  <p>2. Scroll to <strong>Use secure DNS</strong> &rarr; Select <strong>Custom</strong>.</p>
+                  <p>3. Paste:</p>
+                  <code className="block bg-slate-900 p-2 rounded text-emerald-400 font-mono select-all">
+                    https://advgaurd.veerbhanushali.com/dns-query
+                  </code>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* VIEW 7: SETTINGS & CLOUD */}
+        {activeNav === 'settings' && (
+          <div
+            className={`p-6 rounded-2xl border space-y-6 shadow-sm ${
+              isDark ? 'bg-[#101726] border-slate-800' : 'bg-white border-slate-200'
+            }`}
+          >
+            <div>
+              <h3 className={`text-base font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                Database & Cloud Configuration
+              </h3>
+              <p className="text-xs text-slate-500">Single database setup powered by Supabase PostgreSQL.</p>
+            </div>
+
+            <div className="p-4 bg-slate-950 rounded-xl border border-slate-800 flex items-center justify-between">
+              <div>
+                <div className="font-bold text-sm text-white flex items-center gap-2">
+                  <Database className="w-4 h-4 text-emerald-500" /> Supabase PostgreSQL
+                </div>
+                <div className="text-xs text-slate-400">
+                  Stores query logs, custom rules, blocklists, and rewrites with Auth &amp; RLS.
+                </div>
+              </div>
+              <span
+                className={`px-3 py-1 rounded-full text-xs font-bold border ${
+                  cloud.supabaseConnected
+                    ? 'bg-emerald-500/20 text-emerald-500 border-emerald-500/30'
+                    : 'bg-slate-800 text-slate-400 border-slate-700'
+                }`}
+              >
+                {cloud.supabaseConnected ? 'Connected (Cloud)' : 'Local In-Memory Mode'}
+              </span>
+            </div>
+
+            {/* 1-Click SQL runner instructions */}
+            <div className="p-4 bg-slate-950 rounded-xl border border-emerald-500/20 space-y-2 text-xs">
+              <span className="font-bold text-white flex items-center gap-1.5">
+                <FileText className="w-4 h-4 text-emerald-500" /> 1-Click Database Setup Instructions:
+              </span>
+              <p className="text-slate-300">
+                1. Open your project at <a href="https://supabase.com" target="_blank" rel="noreferrer" className="text-emerald-500 underline font-bold">supabase.com</a>.
+              </p>
+              <p className="text-slate-300">
+                2. Go to <strong>SQL Editor</strong> in the left sidebar.
+              </p>
+              <p className="text-slate-300">
+                3. Copy the entire contents of <code className="bg-slate-900 px-1.5 py-0.5 rounded text-emerald-400 font-mono">supabase-schema.sql</code> and click <strong>Run</strong>.
+              </p>
+              <p className="text-slate-300">
+                4. Put your <code className="text-sky-400 font-mono">NEXT_PUBLIC_SUPABASE_URL</code> and <code className="text-sky-400 font-mono">NEXT_PUBLIC_SUPABASE_ANON_KEY</code> in <code className="font-mono text-white">.env.local</code>.
+              </p>
+            </div>
           </div>
         )}
       </main>
 
-      {/* Official AdvGuard Footer */}
-      <footer className="border-t border-slate-800 bg-[#1f2937] py-4 text-xs text-slate-400">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-2">
+      {/* Modern Footer */}
+      <footer
+        className={`border-t py-6 text-xs transition-colors ${
+          isDark ? 'bg-[#0a0f1a] border-slate-800 text-slate-500' : 'bg-white border-slate-200 text-slate-600'
+        }`}
+      >
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-3">
           <div className="flex items-center gap-2">
-            <span className="font-bold text-white">AdvGuard Home</span>
-            <span className="text-slate-500">•</span>
+            <span className={`font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>AdvGuard Home</span>
+            <span>•</span>
             <span>Web Edition v1.0</span>
-            <span className="text-slate-500">•</span>
-            <span className="text-[#2db365] font-semibold">Engineered by Veer Bhanushali</span>
+            <span>•</span>
+            <span className="text-emerald-500 font-bold">Engineered by Veer Bhanushali</span>
           </div>
 
           <div className="flex items-center gap-4">
-            <a href="/LICENSE" className="hover:text-white transition">
+            <a href="/LICENSE" className="hover:text-emerald-500 transition">
               MIT License
             </a>
-            <a href="/README.md" className="hover:text-white transition">
+            <a href="/README.md" className="hover:text-emerald-500 transition">
               Documentation
             </a>
-            <span className="text-slate-500">Copyright © 2026 Veer Bhanushali</span>
+            <span>Copyright © 2026 Veer Bhanushali</span>
           </div>
         </div>
       </footer>

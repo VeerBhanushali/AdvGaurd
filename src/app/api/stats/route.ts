@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { dnsEngine } from '@/lib/dns-engine';
 import { cloudStorage } from '@/lib/cloud-storage';
 import { BLOCKED_SERVICES } from '@/lib/blocked-services';
+import { firewallEngine } from '@/lib/firewall';
+import { userManager } from '@/lib/user-manager';
 
 export const dynamic = 'force-dynamic';
 
@@ -15,7 +17,7 @@ export async function GET() {
   return NextResponse.json({
     success: true,
     stats,
-    logs: logs.slice(0, 100),
+    logs: logs.slice(0, 150),
     rules,
     blocklists,
     cloud,
@@ -39,6 +41,26 @@ export async function POST(req: NextRequest) {
 
     if (body.action === 'set-safebrowsing' && body.enabled !== undefined) {
       dnsEngine.setSafeBrowsing(body.enabled);
+      return NextResponse.json({ success: true });
+    }
+
+    if (body.action === 'update-firewall' && body.config) {
+      firewallEngine.updateConfig(body.config);
+      return NextResponse.json({ success: true });
+    }
+
+    if (body.action === 'register-device' && body.name && body.token) {
+      const dev = userManager.registerDevice(body.name, body.token);
+      return NextResponse.json({ success: true, device: dev });
+    }
+
+    if (body.action === 'delete-device' && body.id) {
+      const ok = userManager.deleteDevice(body.id);
+      return NextResponse.json({ success: ok });
+    }
+
+    if (body.action === 'clear-logs') {
+      dnsEngine.clearLogs();
       return NextResponse.json({ success: true });
     }
 

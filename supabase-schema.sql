@@ -104,3 +104,4 @@ CREATE POLICY "Anon Full Access Services" ON public.blocked_services FOR ALL USI
 CREATE POLICY "Anon Full Access Settings" ON public.settings FOR ALL USING (true) WITH CHECK (true);
 
 -- Done! Your database is completely ready for AdvGuard.
+

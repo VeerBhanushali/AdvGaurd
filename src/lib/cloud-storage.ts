@@ -1,43 +1,30 @@
+import { Redis } from '@upstash/redis';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import { QueryLogEntry } from './types';
+import { QueryLogEntry, EngineStats, CustomRule } from './types';
 
-// Supabase Environment variables
+// Detect environment variables
+const redisUrl = process.env.UPSTASH_REDIS_REST_URL;
+const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN;
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
 const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY;
 
-// High-Speed Local In-Memory Cache (replaces external Redis, 0ms latency, zero extra costs)
-class MemoryLruCache {
-  private cache = new Map<string, { value: string; expiry: number }>();
-  private maxSize = 5000;
-
-  get(key: string): string | null {
-    const item = this.cache.get(key);
-    if (!item) return null;
-    if (Date.now() > item.expiry) {
-      this.cache.delete(key);
-      return null;
-    }
-    // Refresh LRU position
-    this.cache.delete(key);
-    this.cache.set(key, item);
-    return item.value;
-  }
-
-  set(key: string, value: string, ttlSeconds = 300): void {
-    if (this.cache.size >= this.maxSize) {
-      const oldestKey = this.cache.keys().next().value;
-      if (oldestKey) this.cache.delete(oldestKey);
-    }
-    this.cache.set(key, { value, expiry: Date.now() + ttlSeconds * 1000 });
-  }
-}
-
 export class CloudStorage {
   private static instance: CloudStorage;
+  private redis: Redis | null = null;
   private supabase: SupabaseClient | null = null;
-  private memoryCache = new MemoryLruCache();
 
   private constructor() {
+    if (redisUrl && redisToken) {
+      try {
+        this.redis = new Redis({
+          url: redisUrl,
+          token: redisToken,
+        });
+      } catch (e) {
+        console.warn('Failed to initialize Upstash Redis:', e);
+      }
+    }
+
     if (supabaseUrl && supabaseKey) {
       try {
         this.supabase = createClient(supabaseUrl, supabaseKey);
@@ -56,22 +43,35 @@ export class CloudStorage {
 
   public getStatus() {
     return {
+      upstashConnected: !!this.redis,
       supabaseConnected: !!this.supabase,
-      mode: this.supabase ? 'Supabase Cloud (PostgreSQL)' : 'Local In-Memory Mode',
+      mode: this.redis && this.supabase ? 'Cloud Full Tier' : this.redis ? 'Upstash Edge' : this.supabase ? 'Supabase Hybrid' : 'Local In-Memory Fallback',
     };
   }
 
-  // Sub-millisecond DNS In-Memory Cache (Zero external Redis dependency needed!)
+  // Fast DNS Cache (Upstash Redis)
   public async getCachedDns(domain: string, type: string): Promise<string | null> {
-    return this.memoryCache.get(`dns:${type}:${domain}`);
+    if (!this.redis) return null;
+    try {
+      const val = await this.redis.get<string>(`dns:${type}:${domain}`);
+      return val;
+    } catch {
+      return null;
+    }
   }
 
   public async setCachedDns(domain: string, type: string, base64Packet: string, ttl = 300): Promise<void> {
-    this.memoryCache.set(`dns:${type}:${domain}`, base64Packet, ttl);
+    if (!this.redis) return;
+    try {
+      await this.redis.set(`dns:${type}:${domain}`, base64Packet, { ex: ttl });
+    } catch {
+      // ignore cache write error
+    }
   }
 
-  // Asynchronous Query Log Ingestion into Supabase
+  // Asynchronous Query Log Ingestion (Supabase)
   public async saveQueryLog(entry: QueryLogEntry): Promise<void> {
+    // If Supabase is configured, write asynchronously without blocking
     if (this.supabase) {
       try {
         await this.supabase.from('query_logs').insert([
@@ -85,11 +85,26 @@ export class CloudStorage {
             upstream: entry.upstream || null,
           },
         ]);
+      } catch (e) {
+        // non-blocking fallback
+      }
+    }
+
+    // Also push to Redis recent stream if connected
+    if (this.redis) {
+      try {
+        await this.redis.lpush('recent_queries', JSON.stringify(entry));
+        await this.redis.ltrim('recent_queries', 0, 500);
+        await this.redis.incr('total_queries');
+        if (entry.blocked) {
+          await this.redis.incr('blocked_queries');
+        }
       } catch {
-        // Non-blocking fallback to protect DNS latency
+        // ignore
       }
     }
   }
 }
 
 export const cloudStorage = CloudStorage.getInstance();
+

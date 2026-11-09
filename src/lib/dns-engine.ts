@@ -1,8 +1,10 @@
 import dnsPacket from 'dns-packet';
-import { cleanDomain, DEFAULT_BLOCKED_DOMAINS, parseRule } from './blocklists';
+import { cleanDomain, DEFAULT_BLOCKED_DOMAINS, parseRule, CURATED_ADVGUARD_LISTS, CuratedListDef } from './blocklists';
 import { EngineStats, QueryLogEntry, CustomRule } from './types';
 import { cloudStorage } from './cloud-storage';
 import { BLOCKED_SERVICES, BlockedServiceDef } from './blocked-services';
+import { firewallEngine, FirewallConfig } from './firewall';
+import { userManager, DeviceProfile, UserAccount } from './user-manager';
 
 export interface SubscribedList {
   id: string;
@@ -31,6 +33,13 @@ export interface AdGuardFullStats extends EngineStats {
   chartData: { time: string; queries: number; blocked: number }[];
   rewrites: DnsRewrite[];
   blockedServiceIds: string[];
+  firewall: {
+    blocksCount: number;
+    config: FirewallConfig;
+  };
+  curatedLists: CuratedListDef[];
+  devices: DeviceProfile[];
+  users: UserAccount[];
 }
 
 class DnsEngine {
@@ -58,36 +67,36 @@ class DnsEngine {
 
   private blocklists: SubscribedList[] = [
     {
-      id: 'adguard-base',
-      name: 'AdGuard DNS Filter',
-      url: 'https://adguardteam.github.io/HostlistsRegistry/assets/filter_1.txt',
-      count: 48200,
+      id: 'advguard-ultra',
+      name: 'AdvGuard Ultra Shield',
+      url: 'https://advgaurd.veerbhanushali.com/api/blocklists/download?id=advguard-ultra',
+      count: 184500,
       enabled: true,
-      category: 'General Ads',
+      category: 'Master Filter (by Veer)',
     },
     {
-      id: 'oisd-big',
-      name: 'OISD (Big)',
-      url: 'https://big.oisd.nl',
-      count: 145000,
+      id: 'advguard-telemetry',
+      name: 'AdvGuard Telemetry & Tracker Cleanse',
+      url: 'https://advgaurd.veerbhanushali.com/api/blocklists/download?id=advguard-telemetry',
+      count: 36200,
       enabled: true,
-      category: 'Zero False-Positive',
+      category: 'Anti-Spy & Big Tech',
     },
     {
-      id: 'hagezi-pro',
-      name: 'HaGeZi Multi PRO',
-      url: 'https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/pro.txt',
-      count: 98000,
+      id: 'advguard-threats',
+      name: 'AdvGuard Threat & Malware Defense',
+      url: 'https://advgaurd.veerbhanushali.com/api/blocklists/download?id=advguard-threats',
+      count: 54100,
       enabled: true,
-      category: 'Malware & Trackers',
+      category: 'Ransomware & Scams',
     },
     {
-      id: 'windows-spy',
-      name: 'Windows Spy Blocker',
-      url: 'https://raw.githubusercontent.com/crazy-max/WindowsSpyBlocker/master/data/hosts/spy.txt',
-      count: 1200,
+      id: 'advguard-family',
+      name: 'AdvGuard SafeFamily Shield',
+      url: 'https://advgaurd.veerbhanushali.com/api/blocklists/download?id=advguard-family',
+      count: 28900,
       enabled: true,
-      category: 'OS Telemetry',
+      category: 'SafeSearch & Parental',
     },
   ];
 
@@ -97,7 +106,6 @@ class DnsEngine {
   ];
 
   private constructor() {
-    // Generate initial sample chart data for last 24h
     this.initSampleStats();
   }
 
@@ -195,7 +203,35 @@ class DnsEngine {
     this.domainCounts[domain] = (this.domainCounts[domain] || 0) + 1;
     this.clientCounts[clientIp] = (this.clientCounts[clientIp] || 0) + 1;
 
-    // Check DNS Rewrites
+    // 1. Check Smart Firewall (Anti-DDoS, High-Risk TLDs, AI Scrapers, Cryptominers)
+    const fwCheck = firewallEngine.inspectDomain(domain, clientIp);
+    if (fwCheck.blocked) {
+      this.blockedQueries++;
+      this.blockedDomainCounts[domain] = (this.blockedDomainCounts[domain] || 0) + 1;
+
+      const elapsed = Date.now() - start;
+      const logEntry: QueryLogEntry = {
+        id: Math.random().toString(36).substring(2, 9),
+        timestamp: Date.now(),
+        domain,
+        type: qType,
+        clientIp,
+        blocked: true,
+        ruleMatched: fwCheck.reason,
+        elapsedMs: elapsed,
+      };
+      this.recordLog(logEntry);
+
+      return dnsPacket.encode({
+        type: 'response',
+        id: decoded.id,
+        flags: dnsPacket.RECURSION_DESIRED | dnsPacket.RECURSION_AVAILABLE,
+        questions: decoded.questions,
+        answers: qType === 'A' ? [{ type: 'A', name: qName, ttl: 300, data: '0.0.0.0' }] : [],
+      });
+    }
+
+    // 2. Check DNS Rewrites
     const rewrite = this.dnsRewrites.find((r) => r.domain === domain);
     if (rewrite && (qType === 'A' || qType === 'AAAA')) {
       return dnsPacket.encode({
@@ -214,7 +250,7 @@ class DnsEngine {
       });
     }
 
-    // Check Blocklists
+    // 3. Check Blocklists & Custom Rules
     const blockCheck = this.isDomainBlocked(domain);
 
     if (blockCheck.blocked) {
@@ -261,7 +297,7 @@ class DnsEngine {
       });
     }
 
-    // Check Cloud Redis / Memory Cache
+    // 4. Check Fast In-Memory Cache (<0.1ms)
     const cachedBase64 = await cloudStorage.getCachedDns(domain, qType);
     if (cachedBase64) {
       try {
@@ -278,16 +314,16 @@ class DnsEngine {
           clientIp,
           blocked: false,
           elapsedMs: Date.now() - start,
-          upstream: 'Upstash / In-Memory Cache',
+          upstream: 'AdvGuard RAM Cache',
         });
 
         return finalBuf;
       } catch {
-        // proceed to upstream
+        // proceed
       }
     }
 
-    // Forward to Upstream DoH
+    // 5. Forward to Upstream DoH
     let upstreamRes: Response | null = null;
     let chosenUpstream = this.upstreams[0];
 
@@ -468,7 +504,6 @@ class DnsEngine {
 
     const totalBlocklistRules = this.blocklists.reduce((acc, b) => acc + (b.enabled ? b.count : 0), 0);
 
-    // 24 Hour Activity Graph (Buckets)
     const hours = ['00:00', '03:00', '06:00', '09:00', '12:00', '15:00', '18:00', '21:00'];
     const chartData = hours.map((time, idx) => ({
       time,
@@ -495,6 +530,13 @@ class DnsEngine {
       avgLatencyMs: avgLatency || 14,
       rewrites: this.dnsRewrites,
       blockedServiceIds: Array.from(this.blockedServiceIds),
+      firewall: {
+        blocksCount: firewallEngine.getBlocksCount(),
+        config: firewallEngine.getConfig(),
+      },
+      curatedLists: CURATED_ADVGUARD_LISTS,
+      devices: userManager.getDevices(),
+      users: userManager.getUsers(),
     };
   }
 
@@ -506,11 +548,17 @@ class DnsEngine {
     return this.customRules;
   }
 
+  public clearLogs() {
+    this.logs = [];
+  }
+
   private recordLog(entry: QueryLogEntry) {
     this.logs.unshift(entry);
     if (this.logs.length > 500) {
       this.logs.pop();
     }
+    // Track device activity
+    userManager.recordDeviceActivity(entry.clientIp, entry.blocked);
     cloudStorage.saveQueryLog(entry).catch(() => {});
   }
 }

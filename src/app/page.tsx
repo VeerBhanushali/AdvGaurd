@@ -339,7 +339,7 @@ export default function AdGuardHomeUI() {
                   <Shield className="w-5 h-5 fill-white/20 stroke-[2.5]" />
                 </div>
                 <div className="flex items-baseline gap-1">
-                  <span className="font-extrabold text-lg tracking-tight text-white">AdGuard</span>
+                  <span className="font-extrabold text-lg tracking-tight text-white">AdvGuard</span>
                   <span className="text-lg font-light text-[#2db365]">Home</span>
                   <span className="ml-1 text-[10px] font-mono font-medium px-1.5 py-0.2 bg-[#2db365]/20 text-[#2db365] rounded border border-[#2db365]/30">
                     Web Edition
@@ -1268,42 +1268,48 @@ export default function AdGuardHomeUI() {
             {settingsSubTab === 'cloud' && (
               <div className="space-y-6">
                 <div>
-                  <h3 className="text-base font-bold text-white">100% Free Cloud Tier Status</h3>
-                  <p className="text-xs text-slate-400">Upstash Redis & Supabase integration status.</p>
+                  <h3 className="text-base font-bold text-white">Single Database: Supabase PostgreSQL</h3>
+                  <p className="text-xs text-slate-400">
+                    No Redis needed! One 100% free Supabase database handles query logs, custom rules, and authentication.
+                  </p>
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div className="p-4 bg-[#111827] rounded-xl border border-slate-700 flex items-center justify-between">
-                    <div>
-                      <div className="font-bold text-sm text-white">Upstash Redis</div>
-                      <div className="text-xs text-slate-400">Edge Caching</div>
+                <div className="p-4 bg-[#111827] rounded-xl border border-slate-700 flex items-center justify-between">
+                  <div className="space-y-1">
+                    <div className="font-bold text-sm text-white flex items-center gap-2">
+                      <Database className="w-4 h-4 text-[#2db365]" /> Supabase PostgreSQL (Single DB)
                     </div>
-                    <span
-                      className={`px-3 py-1 rounded-full text-xs font-bold border ${
-                        cloud.upstashConnected
-                          ? 'bg-[#2db365]/20 text-[#2db365] border-[#2db365]/30'
-                          : 'bg-slate-800 text-slate-400 border-slate-700'
-                      }`}
-                    >
-                      {cloud.upstashConnected ? 'Connected' : 'In-Memory RAM'}
-                    </span>
+                    <div className="text-xs text-slate-400">
+                      Stores query logs, custom rules, blocklists, and rewrites with built-in Auth & RLS.
+                    </div>
                   </div>
+                  <span
+                    className={`px-3 py-1 rounded-full text-xs font-bold border ${
+                      cloud.supabaseConnected
+                        ? 'bg-[#2db365]/20 text-[#2db365] border-[#2db365]/30'
+                        : 'bg-slate-800 text-slate-400 border-slate-700'
+                    }`}
+                  >
+                    {cloud.supabaseConnected ? 'Connected (Cloud)' : 'Local In-Memory Mode'}
+                  </span>
+                </div>
 
-                  <div className="p-4 bg-[#111827] rounded-xl border border-slate-700 flex items-center justify-between">
-                    <div>
-                      <div className="font-bold text-sm text-white">Supabase PostgreSQL</div>
-                      <div className="text-xs text-slate-400">Long-term Logs Store</div>
-                    </div>
-                    <span
-                      className={`px-3 py-1 rounded-full text-xs font-bold border ${
-                        cloud.supabaseConnected
-                          ? 'bg-[#2db365]/20 text-[#2db365] border-[#2db365]/30'
-                          : 'bg-slate-800 text-slate-400 border-slate-700'
-                      }`}
-                    >
-                      {cloud.supabaseConnected ? 'Connected' : 'Local Storage'}
-                    </span>
-                  </div>
+                <div className="p-4 bg-slate-900 rounded-xl border border-[#2db365]/30 space-y-2 text-xs">
+                  <span className="font-bold text-white flex items-center gap-1.5">
+                    <Code className="w-4 h-4 text-[#2db365]" /> 1-Click Database Setup Instructions:
+                  </span>
+                  <p className="text-slate-300">
+                    1. Open your project at <a href="https://supabase.com" target="_blank" rel="noreferrer" className="text-[#2db365] underline">supabase.com</a>.
+                  </p>
+                  <p className="text-slate-300">
+                    2. Go to <strong>SQL Editor</strong> in the left sidebar.
+                  </p>
+                  <p className="text-slate-300">
+                    3. Copy the entire contents of <code className="bg-slate-800 px-1.5 py-0.5 rounded text-[#2db365] font-mono">supabase-schema.sql</code> and click <strong>Run</strong>.
+                  </p>
+                  <p className="text-slate-300">
+                    4. Add your <code className="bg-slate-800 px-1.5 py-0.5 rounded text-sky-400 font-mono">NEXT_PUBLIC_SUPABASE_URL</code> and <code className="bg-slate-800 px-1.5 py-0.5 rounded text-sky-400 font-mono">NEXT_PUBLIC_SUPABASE_ANON_KEY</code> in <code className="font-mono text-white">.env.local</code>.
+                  </p>
                 </div>
               </div>
             )}
@@ -1311,13 +1317,13 @@ export default function AdGuardHomeUI() {
         )}
       </main>
 
-      {/* Official AdGuard Footer */}
+      {/* Official AdvGuard Footer */}
       <footer className="border-t border-slate-800 bg-[#1f2937] py-4 text-xs text-slate-400">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-2">
           <div className="flex items-center gap-2">
-            <span className="font-bold text-white">AdGuard Home</span>
+            <span className="font-bold text-white">AdvGuard Home</span>
             <span className="text-slate-500">•</span>
-            <span>Web Edition v0.107.80</span>
+            <span>Web Edition v1.0</span>
             <span className="text-slate-500">•</span>
             <span className="text-[#2db365] font-semibold">Engineered by Veer Bhanushali</span>
           </div>

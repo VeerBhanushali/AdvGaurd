@@ -106,3 +106,4 @@ export const BLOCKED_SERVICES: BlockedServiceDef[] = [
     icon: '👾',
   },
 ];
+

@@ -43,6 +43,8 @@ import {
   Filter,
   Eye,
   Key,
+  Unlock,
+  LogOut,
 } from 'lucide-react';
 import { CuratedListDef } from '@/lib/blocklists';
 
@@ -220,17 +222,39 @@ export default function AdvGuardApp() {
   const [testResult, setTestResult] = useState<any>(null);
   const [isTesting, setIsTesting] = useState(false);
 
+  // Admin & Public Access Control
+  const [hasAdminPassword, setHasAdminPassword] = useState(false);
+  const [isAdminUnlocked, setIsAdminUnlocked] = useState(false);
+  const [adminKey, setAdminKey] = useState('');
+  const [showLoginModal, setShowLoginModal] = useState(false);
+  const [loginPasswordInput, setLoginPasswordInput] = useState('');
+  const [loginError, setLoginError] = useState('');
+  const [isVerifying, setIsVerifying] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
+  const [detectedOs, setDetectedOs] = useState('');
+
   const PUBLIC_DOMAIN = 'advgaurd.veerbhanushali.com';
 
   const fetchStats = async () => {
     try {
-      const res = await fetch('/api/stats');
+      const key = localStorage.getItem('advguard-admin-key') || adminKey || '';
+      const res = await fetch('/api/stats', {
+        headers: key ? { 'x-admin-key': key } : {},
+      });
       if (res.ok) {
         const data = await res.json();
         setStats(data.stats);
-        setLogs(data.logs || []);
-        setRules(data.rules || []);
-        setBlocklists(data.blocklists || []);
+        setHasAdminPassword(!!data.hasAdminPassword);
+        setIsAdminUnlocked(!!data.isAdmin);
+        if (data.isAdmin) {
+          setLogs(data.logs || []);
+          setRules(data.rules || []);
+          setBlocklists(data.blocklists || []);
+        } else {
+          setLogs([]);
+          setRules([]);
+          setBlocklists([]);
+        }
         if (data.availableServices) setServices(data.availableServices);
         if (data.cloud) setCloud(data.cloud);
       }
@@ -243,6 +267,31 @@ export default function AdvGuardApp() {
     setHostUrl(window.location.origin);
     const savedTheme = localStorage.getItem('advguard-theme') as 'dark' | 'light' | null;
     if (savedTheme) setTheme(savedTheme);
+
+    const savedKey = localStorage.getItem('advguard-admin-key');
+    if (savedKey) {
+      setAdminKey(savedKey);
+      setIsAdminUnlocked(true);
+    } else {
+      setActiveNav('guide');
+    }
+
+    if (typeof navigator !== 'undefined') {
+      const ua = navigator.userAgent.toLowerCase();
+      if (/iphone|ipad|ipod/.test(ua)) {
+        setDetectedOs('Apple iOS');
+        setGuideSubTab('ios');
+      } else if (/android/.test(ua)) {
+        setDetectedOs('Android');
+        setGuideSubTab('android');
+      } else if (/win/.test(ua)) {
+        setDetectedOs('Windows');
+        setGuideSubTab('windows');
+      } else if (/mac/.test(ua)) {
+        setDetectedOs('macOS');
+        setGuideSubTab('browser');
+      }
+    }
 
     fetchStats();
     if (!autoRefresh) return;
@@ -262,23 +311,74 @@ export default function AdvGuardApp() {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const toggleProtection = async () => {
-    await fetch('/api/stats', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'set-protection', enabled: !stats.protectionEnabled }),
-    });
+  const authPost = async (action: string, payload: any = {}) => {
+    const key = localStorage.getItem('advguard-admin-key') || adminKey || '';
+    try {
+      const res = await fetch('/api/stats', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(key ? { 'x-admin-key': key } : {}),
+        },
+        body: JSON.stringify({ action, ...payload }),
+      });
+      if (res.status === 401) {
+        setShowLoginModal(true);
+        return false;
+      }
+      return res.ok;
+    } catch {
+      return false;
+    }
+  };
+
+  const handleAdminLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!loginPasswordInput) return;
+    setIsVerifying(true);
+    setLoginError('');
+    try {
+      const res = await fetch('/api/stats', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'verify-admin', password: loginPasswordInput }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        localStorage.setItem('advguard-admin-key', loginPasswordInput);
+        setAdminKey(loginPasswordInput);
+        setIsAdminUnlocked(true);
+        setShowLoginModal(false);
+        setLoginPasswordInput('');
+        setActiveNav('dashboard');
+        fetchStats();
+      } else {
+        setLoginError('Incorrect admin passcode. Access denied.');
+      }
+    } catch {
+      setLoginError('Authentication failed. Server unreachable.');
+    } finally {
+      setIsVerifying(false);
+    }
+  };
+
+  const handleAdminLogout = () => {
+    localStorage.removeItem('advguard-admin-key');
+    setAdminKey('');
+    setIsAdminUnlocked(false);
+    setActiveNav('guide');
     fetchStats();
+  };
+
+  const toggleProtection = async () => {
+    const ok = await authPost('set-protection', { enabled: !stats.protectionEnabled });
+    if (ok) fetchStats();
   };
 
   const updateFirewall = async (key: string, value: any) => {
     const updated = { ...stats.firewall.config, [key]: value };
-    await fetch('/api/stats', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'update-firewall', config: updated }),
-    });
-    fetchStats();
+    const ok = await authPost('update-firewall', { config: updated });
+    if (ok) fetchStats();
   };
 
   const registerDevice = async (e: React.FormEvent) => {
@@ -296,21 +396,13 @@ export default function AdvGuardApp() {
   };
 
   const deleteDevice = async (id: string) => {
-    await fetch('/api/stats', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'delete-device', id }),
-    });
-    fetchStats();
+    const ok = await authPost('delete-device', { id });
+    if (ok) fetchStats();
   };
 
   const clearLogs = async () => {
-    await fetch('/api/stats', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'clear-logs' }),
-    });
-    fetchStats();
+    const ok = await authPost('clear-logs');
+    if (ok) fetchStats();
   };
 
   const exportLogsToCsv = () => {
@@ -333,21 +425,13 @@ export default function AdvGuardApp() {
   };
 
   const toggleBlockedService = async (serviceId: string, current: boolean) => {
-    await fetch('/api/stats', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'toggle-service', serviceId, enabled: !current }),
-    });
-    fetchStats();
+    const ok = await authPost('toggle-service', { serviceId, enabled: !current });
+    if (ok) fetchStats();
   };
 
   const toggleBlocklist = async (id: string, current: boolean) => {
-    await fetch('/api/stats', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'toggle-blocklist', id, enabled: !current }),
-    });
-    fetchStats();
+    const ok = await authPost('toggle-blocklist', { id, enabled: !current });
+    if (ok) fetchStats();
   };
 
   const addCustomRule = async () => {
@@ -355,12 +439,8 @@ export default function AdvGuardApp() {
     let count = 0;
     for (const line of lines) {
       if (line.trim()) {
-        await fetch('/api/stats', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'add-rule', rule: line.trim() }),
-        });
-        count++;
+        const ok = await authPost('add-rule', { rule: line.trim() });
+        if (ok) count++;
       }
     }
     setCustomRulesText('');
@@ -370,43 +450,29 @@ export default function AdvGuardApp() {
   };
 
   const deleteRule = async (id: string) => {
-    await fetch('/api/stats', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'delete-rule', id }),
-    });
-    fetchStats();
+    const ok = await authPost('delete-rule', { id });
+    if (ok) fetchStats();
   };
 
   const addRewrite = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!rewriteDomain.trim() || !rewriteIp.trim()) return;
-    await fetch('/api/stats', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'add-rewrite', domain: rewriteDomain, answer: rewriteIp }),
-    });
-    setRewriteDomain('');
-    setRewriteIp('');
-    fetchStats();
+    const ok = await authPost('add-rewrite', { domain: rewriteDomain, answer: rewriteIp });
+    if (ok) {
+      setRewriteDomain('');
+      setRewriteIp('');
+      fetchStats();
+    }
   };
 
   const deleteRewrite = async (id: string) => {
-    await fetch('/api/stats', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'delete-rewrite', id }),
-    });
-    fetchStats();
+    const ok = await authPost('delete-rewrite', { id });
+    if (ok) fetchStats();
   };
 
   const quickBlock = async (domain: string) => {
-    await fetch('/api/stats', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'add-rule', rule: `||${domain}^` }),
-    });
-    fetchStats();
+    const ok = await authPost('add-rule', { rule: `||${domain}^` });
+    if (ok) fetchStats();
   };
 
   const runTester = async (e: React.FormEvent) => {
@@ -469,15 +535,21 @@ export default function AdvGuardApp() {
 
               {/* Navigation Links */}
               <nav className="hidden lg:flex items-center space-x-1 text-sm font-medium">
-                {[
-                  { id: 'dashboard', label: 'Dashboard', icon: Activity },
-                  { id: 'logs', label: 'Query Log', icon: ShieldAlert },
-                  { id: 'firewall', label: 'Smart Firewall', icon: Flame },
-                  { id: 'filters', label: 'Blocklists & Rules', icon: Layers },
-                  { id: 'users', label: 'Devices & Users', icon: Users },
-                  { id: 'guide', label: 'Setup Guide', icon: Smartphone },
-                  { id: 'settings', label: 'Settings', icon: Sliders },
-                ].map((item) => {
+                {(isAdminUnlocked
+                  ? [
+                      { id: 'dashboard', label: 'Dashboard', icon: Activity },
+                      { id: 'logs', label: 'Query Log', icon: ShieldAlert },
+                      { id: 'firewall', label: 'Smart Firewall', icon: Flame },
+                      { id: 'filters', label: 'Blocklists & Rules', icon: Layers },
+                      { id: 'users', label: 'Devices & Users', icon: Users },
+                      { id: 'guide', label: 'Setup Guide', icon: Smartphone },
+                      { id: 'settings', label: 'Settings', icon: Sliders },
+                    ]
+                  : [
+                      { id: 'guide', label: 'Connect & Setup Guide', icon: Smartphone },
+                      { id: 'firewall', label: 'Firewall Protection', icon: Flame },
+                    ]
+                ).map((item) => {
                   const Icon = item.icon;
                   const active = activeNav === item.id;
                   return (
@@ -504,22 +576,54 @@ export default function AdvGuardApp() {
 
             {/* Right Header Actions */}
             <div className="flex items-center gap-3">
-              {/* Protection Switch */}
-              <button
-                onClick={toggleProtection}
-                className={`flex items-center gap-2 px-3.5 py-1.5 rounded-full text-xs font-bold transition border ${
-                  stats.protectionEnabled
-                    ? 'bg-emerald-500/10 text-emerald-500 border-emerald-500/30 hover:bg-emerald-500/20'
-                    : 'bg-rose-500/10 text-rose-500 border-rose-500/30 hover:bg-rose-500/20'
-                }`}
-              >
-                <span
-                  className={`w-2 h-2 rounded-full ${
-                    stats.protectionEnabled ? 'bg-emerald-500 animate-pulse' : 'bg-rose-500'
-                  }`}
-                />
-                Protection: {stats.protectionEnabled ? 'ON' : 'PAUSED'}
-              </button>
+              {isAdminUnlocked ? (
+                <>
+                  {/* Protection Switch (Admin Only) */}
+                  <button
+                    onClick={toggleProtection}
+                    className={`flex items-center gap-2 px-3.5 py-1.5 rounded-full text-xs font-bold transition border ${
+                      stats.protectionEnabled
+                        ? 'bg-emerald-500/10 text-emerald-500 border-emerald-500/30 hover:bg-emerald-500/20'
+                        : 'bg-rose-500/10 text-rose-500 border-rose-500/30 hover:bg-rose-500/20'
+                    }`}
+                  >
+                    <span
+                      className={`w-2 h-2 rounded-full ${
+                        stats.protectionEnabled ? 'bg-emerald-500 animate-pulse' : 'bg-rose-500'
+                      }`}
+                    />
+                    Protection: {stats.protectionEnabled ? 'ON' : 'PAUSED'}
+                  </button>
+
+                  {/* Sign Out Button */}
+                  <button
+                    onClick={handleAdminLogout}
+                    title="Sign out of Admin Session"
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/20 transition"
+                  >
+                    <Unlock className="w-3.5 h-3.5" />
+                    <span className="hidden sm:inline">Admin Mode</span>
+                    <LogOut className="w-3.5 h-3.5 ml-0.5 text-slate-400" />
+                  </button>
+                </>
+              ) : (
+                <>
+                  {/* Public Shield Status Indicator */}
+                  <div className="flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                    <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                    <span className="hidden sm:inline">Public Cloud DNS:</span> Active
+                  </div>
+
+                  {/* Admin Sign In Trigger */}
+                  <button
+                    onClick={() => setShowLoginModal(true)}
+                    className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-bold bg-slate-800 hover:bg-slate-700 text-white border border-slate-700 transition shadow-sm"
+                  >
+                    <Lock className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Admin Login</span>
+                  </button>
+                </>
+              )}
 
               {/* Theme Toggle Button */}
               <button
@@ -659,7 +763,42 @@ export default function AdvGuardApp() {
           </div>
         </div>
 
-        {/* VIEW 1: DASHBOARD */}
+        {/* PUBLIC ACCESS RESTRICTION BANNER FOR ADMIN TABS */}
+        {!isAdminUnlocked && activeNav !== 'guide' && activeNav !== 'firewall' ? (
+          <div
+            className={`p-8 max-w-xl mx-auto rounded-3xl border text-center space-y-4 shadow-xl my-12 ${
+              isDark ? 'border-slate-800 bg-[#101726]' : 'border-slate-200 bg-white'
+            }`}
+          >
+            <div className="w-12 h-12 rounded-2xl bg-amber-500/10 border border-amber-500/20 text-amber-400 flex items-center justify-center mx-auto">
+              <Lock className="w-6 h-6" />
+            </div>
+            <div className="space-y-1.5">
+              <h3 className={`font-extrabold text-lg ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                Admin Portal Protected
+              </h3>
+              <p className="text-xs text-slate-400 leading-relaxed max-w-md mx-auto">
+                You are connected to the official <strong>AdvGuard Public DNS</strong>. Real-time query logs, firewall configuration, and cloud database settings are restricted to system administrators to safeguard user privacy.
+              </p>
+            </div>
+            <div className="pt-2 flex items-center justify-center gap-3">
+              <button
+                onClick={() => setActiveNav('guide')}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-xl"
+              >
+                View Public Setup Guide
+              </button>
+              <button
+                onClick={() => setShowLoginModal(true)}
+                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-xl shadow-md flex items-center gap-1.5"
+              >
+                <Lock className="w-3.5 h-3.5" /> Sign In as Admin
+              </button>
+            </div>
+          </div>
+        ) : (
+          <>
+            {/* VIEW 1: DASHBOARD */}
         {activeNav === 'dashboard' && (
           <div className="space-y-8">
             {/* 4 Big KPI Metric Cards */}
@@ -1873,7 +2012,93 @@ NEXT_PUBLIC_SUPABASE_URL="..."&#10;NEXT_PUBLIC_SUPABASE_ANON_KEY="..."
             </div>
           </div>
         )}
-      </main>
+      </>
+    )}
+
+    {/* ADMIN LOGIN MODAL */}
+    {showLoginModal && (
+      <div className="fixed inset-0 bg-black/70 backdrop-blur-md z-50 flex items-center justify-center p-4">
+        <div
+          className={`max-w-md w-full p-6 rounded-2xl border space-y-5 shadow-2xl transition-all ${
+            isDark ? 'bg-[#0E1524] border-slate-800 text-white' : 'bg-white border-slate-200 text-slate-900'
+          }`}
+        >
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2.5">
+              <div className="w-9 h-9 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 flex items-center justify-center">
+                <Lock className="w-4 h-4" />
+              </div>
+              <div>
+                <h4 className="font-extrabold text-sm">AdvGuard Admin Login</h4>
+                <p className="text-[11px] text-slate-400">Authenticate to manage cloud DNS &amp; telemetry</p>
+              </div>
+            </div>
+            <button
+              onClick={() => {
+                setShowLoginModal(false);
+                setLoginError('');
+              }}
+              className="text-slate-500 hover:text-slate-300 p-1 rounded-lg"
+            >
+              ✕
+            </button>
+          </div>
+
+          <form onSubmit={handleAdminLogin} className="space-y-4 text-xs">
+            {loginError && (
+              <div className="p-3 bg-rose-500/10 border border-rose-500/20 text-rose-400 rounded-xl text-xs font-semibold">
+                {loginError}
+              </div>
+            )}
+
+            <div className="space-y-1.5">
+              <label className="text-slate-400 font-semibold">Master Admin Passcode</label>
+              <div className="relative">
+                <input
+                  type={showPassword ? 'text' : 'password'}
+                  value={loginPasswordInput}
+                  onChange={(e) => setLoginPasswordInput(e.target.value)}
+                  placeholder="Enter admin passcode"
+                  autoFocus
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500 pr-10 font-mono"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword(!showPassword)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300"
+                >
+                  <Eye className="w-4 h-4" />
+                </button>
+              </div>
+              <p className="text-[11px] text-slate-500">
+                Default password: <code className="text-emerald-400">advguard2026</code> (configured via <code className="text-emerald-400">ADMIN_PASSWORD</code>).
+              </p>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowLoginModal(false);
+                  setLoginError('');
+                }}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl font-semibold"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={isVerifying || !loginPasswordInput}
+                className="px-5 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold rounded-xl shadow-md transition flex items-center gap-1.5"
+              >
+                {isVerifying ? 'Verifying...' : 'Unlock Admin Panel'}
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    )}
+  </main>
 
       {/* Modern Footer */}
       <footer

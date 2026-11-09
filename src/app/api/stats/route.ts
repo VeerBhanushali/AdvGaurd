@@ -7,15 +7,46 @@ import { userManager } from '@/lib/user-manager';
 
 export const dynamic = 'force-dynamic';
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const adminPassword = process.env.ADMIN_PASSWORD;
+  const authKey = req.headers.get('x-admin-key');
+  const isAdmin = !adminPassword || authKey === adminPassword;
+
   const stats = dnsEngine.getFullStats();
+  const cloud = cloudStorage.getStatus();
+
+  // If not admin, sanitize output to protect privacy on public DNS
+  if (!isAdmin) {
+    return NextResponse.json({
+      success: true,
+      isAdmin: false,
+      hasAdminPassword: !!adminPassword,
+      stats: {
+        totalQueries: stats.totalQueries,
+        blockedQueries: stats.blockedQueries,
+        rulesCount: stats.rulesCount,
+        avgLatencyMs: stats.avgLatencyMs,
+        protectionEnabled: stats.protectionEnabled,
+        chartData: stats.chartData,
+      },
+      cloud: {
+        privacyMode: cloud.privacyMode,
+        retentionPolicy: cloud.retentionPolicy,
+        mode: cloud.mode,
+      },
+      availableServices: BLOCKED_SERVICES,
+    });
+  }
+
+  // Admin view: full access to query logs, custom rules, firewall, and blocklists
   const logs = dnsEngine.getLogs();
   const rules = dnsEngine.getRules();
   const blocklists = dnsEngine.getBlocklists();
-  const cloud = cloudStorage.getStatus();
 
   return NextResponse.json({
     success: true,
+    isAdmin: true,
+    hasAdminPassword: !!adminPassword,
     stats,
     logs: logs.slice(0, 150),
     rules,
@@ -28,6 +59,25 @@ export async function GET() {
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
+    const adminPassword = process.env.ADMIN_PASSWORD;
+    const authKey = req.headers.get('x-admin-key');
+
+    // 1. Password verification endpoint
+    if (body.action === 'verify-admin') {
+      const isValid = !adminPassword || body.password === adminPassword;
+      return NextResponse.json({ success: isValid, hasPassword: !!adminPassword });
+    }
+
+    // 2. Public visitor device registration is open
+    if (body.action === 'register-device' && body.name && body.token) {
+      const dev = userManager.registerDevice(body.name, body.token);
+      return NextResponse.json({ success: true, device: dev });
+    }
+
+    // 3. Security Guard: All mutating engine settings require admin authentication
+    if (adminPassword && authKey !== adminPassword) {
+      return NextResponse.json({ error: 'Unauthorized: Admin password required' }, { status: 401 });
+    }
 
     if (body.action === 'set-protection' && body.enabled !== undefined) {
       dnsEngine.setProtection(body.enabled);

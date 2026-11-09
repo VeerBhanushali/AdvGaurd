@@ -22,9 +22,18 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-# local env files
-.env*.local
+# local env files & security keys (NEVER commit secrets to git!)
 .env
+.env*.local
+.env.production
+.env.staging
+.env.development
+*.token
+*.key
+*.pem
+credentials.json
+service-account*.json
+!.env.example
 
 # vercel
 .vercel

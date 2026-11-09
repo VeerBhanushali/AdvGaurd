@@ -87,6 +87,32 @@ INSERT INTO public.settings (id, protection_enabled, safesearch_enabled, safebro
 VALUES ('global', true, false, true)
 ON CONFLICT (id) DO NOTHING;
 
+-- 7. REGISTERED CLIENT DEVICES
+CREATE TABLE IF NOT EXISTS public.devices (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    token TEXT NOT NULL UNIQUE,
+    owner_email TEXT DEFAULT 'admin@advguard.local',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_active TIMESTAMPTZ NOT NULL DEFAULT now(),
+    total_queries INT NOT NULL DEFAULT 0,
+    blocked_queries INT NOT NULL DEFAULT 0,
+    status VARCHAR(20) NOT NULL DEFAULT 'active'
+);
+
+-- 8. AUTOMATIC 30-DAY LOG PURGE FUNCTION (GDPR & High-Security Privacy)
+CREATE OR REPLACE FUNCTION delete_old_query_logs()
+RETURNS INT LANGUAGE plpgsql AS $$
+DECLARE
+    deleted_count INT;
+BEGIN
+    DELETE FROM public.query_logs 
+    WHERE timestamp < (NOW() - INTERVAL '30 days');
+    GET DIAGNOSTICS deleted_count = ROW_COUNT;
+    RETURN deleted_count;
+END;
+$$;
+
 -- Enable Row Level Security (RLS) with Public Access Policy for DoH Engine
 ALTER TABLE public.query_logs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.custom_rules ENABLE ROW LEVEL SECURITY;
@@ -94,14 +120,29 @@ ALTER TABLE public.subscribed_blocklists ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.dns_rewrites ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.blocked_services ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.settings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.devices ENABLE ROW LEVEL SECURITY;
 
 -- Allow anonymous read/write with anon key
+DROP POLICY IF EXISTS "Anon Full Access Query Logs" ON public.query_logs;
 CREATE POLICY "Anon Full Access Query Logs" ON public.query_logs FOR ALL USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Anon Full Access Custom Rules" ON public.custom_rules;
 CREATE POLICY "Anon Full Access Custom Rules" ON public.custom_rules FOR ALL USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Anon Full Access Blocklists" ON public.subscribed_blocklists;
 CREATE POLICY "Anon Full Access Blocklists" ON public.subscribed_blocklists FOR ALL USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Anon Full Access Rewrites" ON public.dns_rewrites;
 CREATE POLICY "Anon Full Access Rewrites" ON public.dns_rewrites FOR ALL USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Anon Full Access Services" ON public.blocked_services;
 CREATE POLICY "Anon Full Access Services" ON public.blocked_services FOR ALL USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Anon Full Access Settings" ON public.settings;
 CREATE POLICY "Anon Full Access Settings" ON public.settings FOR ALL USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Anon Full Access Devices" ON public.devices;
+CREATE POLICY "Anon Full Access Devices" ON public.devices FOR ALL USING (true) WITH CHECK (true);
 
 -- Done! Your database is completely ready for AdvGuard.
 

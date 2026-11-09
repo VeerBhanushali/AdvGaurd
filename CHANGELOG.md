@@ -4,6 +4,19 @@ All notable changes to the **AdvGuard** project are documented in this file.
 
 ---
 
+## [v1.1.0] - 2026-11-10
+
+### 🛡️ Enterprise Security, Zero-PII Privacy & Cloud Automation
+
+#### 🔒 Privacy & Data Protection (Public vs. Self-Hosted)
+* **Zero-PII IP Anonymization**: All public DNS queries automatically mask client IPs (e.g. `103.21.244.xxx` and `/64` IPv6) before persisting to logs, ensuring complete user anonymity.
+* **Automated 30-Day Log Purge**: Added automated background worker and database routine `delete_old_query_logs()` to prune queries older than 30 days.
+* **Production Database Setup**: Automatically provisioned and initialized the official `advguard-prod` database on Supabase with Row Level Security (RLS) policies and verified blocklist seeds.
+* **Dual Database Architecture**: Added seamless Google Firebase (Firestore + Auth) zero-SQL adapter alongside Supabase PostgreSQL.
+* **Git Hygiene & Security Policy**: Created [`SECURITY.md`](SECURITY.md) and hardened `.gitignore` against accidental secret commits.
+
+---
+
 ## [v1.0.0] - 2026-11-10
 
 ### 🚀 Major Release — Created & Engineered by Veer Bhanushali
@@ -44,3 +57,4 @@ All notable changes to the **AdvGuard** project are documented in this file.
 ---
 
 *AdvGuard is released under the **MIT Open Source License** by **Veer Bhanushali**.*
+

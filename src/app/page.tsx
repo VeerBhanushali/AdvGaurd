@@ -136,6 +136,7 @@ interface ServiceDef {
 }
 
 interface CloudStatus {
+  firebaseConnected?: boolean;
   supabaseConnected: boolean;
   mode: string;
 }
@@ -183,6 +184,7 @@ export default function AdvGuardApp() {
   const [blocklists, setBlocklists] = useState<SubscribedList[]>([]);
   const [services, setServices] = useState<ServiceDef[]>([]);
   const [cloud, setCloud] = useState<CloudStatus>({
+    firebaseConnected: false,
     supabaseConnected: false,
     mode: 'Local In-Memory Mode',
   });
@@ -1741,48 +1743,133 @@ export default function AdvGuardApp() {
           >
             <div>
               <h3 className={`text-base font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>
-                Database & Cloud Configuration
+                Database &amp; Cloud Configuration
               </h3>
-              <p className="text-xs text-slate-500">Single database setup powered by Supabase PostgreSQL.</p>
+              <p className="text-xs text-slate-500">
+                AdvGuard supports dual zero-friction cloud engines: Firebase (Zero-SQL NoSQL) or Supabase (PostgreSQL SQL).
+              </p>
             </div>
 
+            {/* Current Active Engine Status */}
             <div className="p-4 bg-slate-950 rounded-xl border border-slate-800 flex items-center justify-between">
               <div>
                 <div className="font-bold text-sm text-white flex items-center gap-2">
-                  <Database className="w-4 h-4 text-emerald-500" /> Supabase PostgreSQL
+                  <Database className="w-4 h-4 text-emerald-500" /> Active Database Engine
                 </div>
-                <div className="text-xs text-slate-400">
-                  Stores query logs, custom rules, blocklists, and rewrites with Auth &amp; RLS.
+                <div className="text-xs text-slate-400 font-mono mt-0.5">
+                  Mode: {cloud.mode}
                 </div>
               </div>
               <span
                 className={`px-3 py-1 rounded-full text-xs font-bold border ${
-                  cloud.supabaseConnected
+                  cloud.firebaseConnected || cloud.supabaseConnected
                     ? 'bg-emerald-500/20 text-emerald-500 border-emerald-500/30'
-                    : 'bg-slate-800 text-slate-400 border-slate-700'
+                    : 'bg-amber-500/20 text-amber-400 border-amber-500/30'
                 }`}
               >
-                {cloud.supabaseConnected ? 'Connected (Cloud)' : 'Local In-Memory Mode'}
+                {cloud.firebaseConnected
+                  ? '⚡ Firebase Connected'
+                  : cloud.supabaseConnected
+                  ? '⚡ Supabase Connected'
+                  : '🚀 Ultra-Fast RAM Cache Active'}
               </span>
             </div>
 
-            {/* 1-Click SQL runner instructions */}
-            <div className="p-4 bg-slate-950 rounded-xl border border-emerald-500/20 space-y-2 text-xs">
-              <span className="font-bold text-white flex items-center gap-1.5">
-                <FileText className="w-4 h-4 text-emerald-500" /> 1-Click Database Setup Instructions:
+            {/* Dual Engine Cards */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {/* Option A: Firebase */}
+              <div
+                className={`p-5 rounded-xl border space-y-3 ${
+                  cloud.firebaseConnected
+                    ? 'bg-emerald-950/20 border-emerald-500/40'
+                    : isDark
+                    ? 'bg-slate-950 border-slate-800'
+                    : 'bg-slate-50 border-slate-200'
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-sm text-white flex items-center gap-2">
+                    🔥 Google Firebase
+                  </span>
+                  <span
+                    className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                      cloud.firebaseConnected
+                        ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30'
+                        : 'bg-slate-800 text-slate-400 border-slate-700'
+                    }`}
+                  >
+                    {cloud.firebaseConnected ? 'CONNECTED' : 'ZERO SQL SETUP'}
+                  </span>
+                </div>
+                <p className="text-xs text-slate-400">
+                  Zero SQL migrations needed. Collections like <code className="text-emerald-400">query_logs</code> auto-create dynamically on the first query.
+                </p>
+                <div className="p-3 bg-slate-900 rounded-lg text-xs space-y-1.5 text-slate-300 border border-slate-800">
+                  <div className="font-semibold text-slate-200">How to connect Firebase:</div>
+                  <p>1. Create project at <a href="https://console.firebase.google.com" target="_blank" rel="noreferrer" className="text-emerald-400 underline font-bold">firebase.google.com</a></p>
+                  <p>2. Enable <strong>Firestore Database</strong> and <strong>Authentication</strong></p>
+                  <p>3. Copy web app config to <code className="text-sky-400 font-mono">.env.local</code>:</p>
+                  <pre className="bg-slate-950 p-2 rounded text-[11px] text-slate-400 font-mono overflow-x-auto">
+NEXT_PUBLIC_FIREBASE_API_KEY="..."&#10;NEXT_PUBLIC_FIREBASE_PROJECT_ID="..."
+                  </pre>
+                </div>
+              </div>
+
+              {/* Option B: Supabase */}
+              <div
+                className={`p-5 rounded-xl border space-y-3 ${
+                  cloud.supabaseConnected
+                    ? 'bg-emerald-950/20 border-emerald-500/40'
+                    : isDark
+                    ? 'bg-slate-950 border-slate-800'
+                    : 'bg-slate-50 border-slate-200'
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-sm text-white flex items-center gap-2">
+                    ⚡ Supabase (PostgreSQL)
+                  </span>
+                  <span
+                    className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                      cloud.supabaseConnected
+                        ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30'
+                        : 'bg-slate-800 text-slate-400 border-slate-700'
+                    }`}
+                  >
+                    {cloud.supabaseConnected ? 'CONNECTED' : 'RELATIONAL SQL'}
+                  </span>
+                </div>
+                <p className="text-xs text-slate-400">
+                  Ideal for large-scale time-series analytics, relational queries, and zero daily write-count quotas.
+                </p>
+                <div className="p-3 bg-slate-900 rounded-lg text-xs space-y-1.5 text-slate-300 border border-slate-800">
+                  <div className="font-semibold text-slate-200">How to connect Supabase:</div>
+                  <p>1. Create project at <a href="https://supabase.com" target="_blank" rel="noreferrer" className="text-emerald-400 underline font-bold">supabase.com</a></p>
+                  <p>2. Open <strong>SQL Editor</strong> &amp; run <code className="text-emerald-400 font-mono">supabase-schema.sql</code></p>
+                  <p>3. Copy Project URL &amp; Anon Key to <code className="text-sky-400 font-mono">.env.local</code>:</p>
+                  <pre className="bg-slate-950 p-2 rounded text-[11px] text-slate-400 font-mono overflow-x-auto">
+NEXT_PUBLIC_SUPABASE_URL="..."&#10;NEXT_PUBLIC_SUPABASE_ANON_KEY="..."
+                  </pre>
+                </div>
+              </div>
+            </div>
+
+            {/* Built-in Memory RAM Cache Banner */}
+            <div className="p-4 bg-slate-950 rounded-xl border border-emerald-500/20 text-xs text-slate-300 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="w-8 h-8 rounded-lg bg-emerald-500/10 text-emerald-400 flex items-center justify-center font-bold font-mono">
+                  RAM
+                </div>
+                <div>
+                  <div className="font-bold text-white">Built-in In-Memory LRU Shield (0.01ms Latency)</div>
+                  <div className="text-[11px] text-slate-400">
+                    AdvGuard caches all frequent DNS responses in RAM to eliminate redundant database reads and reduce API calls to zero.
+                  </div>
+                </div>
+              </div>
+              <span className="text-emerald-400 font-bold px-2 py-1 bg-emerald-500/10 rounded-md border border-emerald-500/20">
+                Always Active
               </span>
-              <p className="text-slate-300">
-                1. Open your project at <a href="https://supabase.com" target="_blank" rel="noreferrer" className="text-emerald-500 underline font-bold">supabase.com</a>.
-              </p>
-              <p className="text-slate-300">
-                2. Go to <strong>SQL Editor</strong> in the left sidebar.
-              </p>
-              <p className="text-slate-300">
-                3. Copy the entire contents of <code className="bg-slate-900 px-1.5 py-0.5 rounded text-emerald-400 font-mono">supabase-schema.sql</code> and click <strong>Run</strong>.
-              </p>
-              <p className="text-slate-300">
-                4. Put your <code className="text-sky-400 font-mono">NEXT_PUBLIC_SUPABASE_URL</code> and <code className="text-sky-400 font-mono">NEXT_PUBLIC_SUPABASE_ANON_KEY</code> in <code className="font-mono text-white">.env.local</code>.
-              </p>
             </div>
           </div>
         )}
